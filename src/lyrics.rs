@@ -1,5 +1,8 @@
 //! Synced lyrics lookup on LRCLIB (lrclib.net). Only title, artist, album and length are sent.
 
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use windows::core::{Result, HSTRING};
 use windows::Foundation::Uri;
@@ -12,10 +15,37 @@ const API: &str = "https://lrclib.net/api";
 const USER_AGENT: &str = "SuiNotch/1.0 (a living notch for Windows)";
 const DURATION_TOLERANCE_S: f64 = 4.0;
 
-pub fn fetch(info: MediaInfo) {
+/// How far each song's lyrics were nudged, in ms (positive shows lines later). Kept in lyrics.json.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(default)]
+pub struct Shifts {
+    pub ms: HashMap<String, i64>,
+}
+
+pub const SHIFT_STEP_MS: i64 = 500;
+const MAX_SHIFT_MS: i64 = 30_000;
+
+impl Shifts {
+    pub fn get(&self, key: u64) -> i64 {
+        self.ms.get(&key.to_string()).copied().unwrap_or(0)
+    }
+
+    pub fn nudge(&mut self, key: u64, delta: i64) {
+        let v = (self.get(key) + delta).clamp(-MAX_SHIFT_MS, MAX_SHIFT_MS);
+        if v == 0 {
+            self.ms.remove(&key.to_string());
+        } else {
+            self.ms.insert(key.to_string(), v);
+        }
+    }
+}
+
+/// Looks up lyrics; `attempt` 0 is the best match, each retry moves on to another candidate.
+pub fn fetch(info: MediaInfo, attempt: usize) {
     std::thread::spawn(move || {
         let key = info.track_key();
-        let lines = lookup(&info).unwrap_or_else(|e| {
+        let found = if attempt == 0 { lookup(&info) } else { lookup_other(&info, attempt) };
+        let lines = found.unwrap_or_else(|e| {
             crate::log(&format!("lyrics lookup failed: {e}"));
             Vec::new()
         });
@@ -47,6 +77,40 @@ fn lookup(info: &MediaInfo) -> Result<Vec<Line>> {
     let body = get(&client, &url)?;
     let results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
     Ok(pick_best(&results, duration_s).and_then(|v| lines_from(v, info.duration_ms)).unwrap_or_default())
+}
+
+/// Another candidate for "Search again": the search results in order of fit, then a broader
+/// search by title alone.
+fn lookup_other(info: &MediaInfo, attempt: usize) -> Result<Vec<Line>> {
+    let client = HttpClient::new()?;
+    let _ = client.DefaultRequestHeaders()?.UserAgent()?.TryParseAdd(&HSTRING::from(USER_AGENT));
+    let title = clean_title(&info.title);
+    let artist = primary_artist(&info.artist);
+    let duration_s = info.duration_ms as f64 / 1000.0;
+    let mut candidates: Vec<Value> = Vec::new();
+    for url in [
+        format!("{API}/search?track_name={}&artist_name={}", encode(&title), encode(&artist)),
+        format!("{API}/search?q={}", encode(&title)),
+    ] {
+        let body = get(&client, &url).unwrap_or_default();
+        let results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
+        for v in ranked(&results, duration_s) {
+            if !candidates.iter().any(|c| c.get("id") == v.get("id")) {
+                candidates.push(v.clone());
+            }
+        }
+    }
+    let usable: Vec<Vec<Line>> = candidates.iter().filter_map(|v| lines_from(v, info.duration_ms)).collect();
+    Ok(if usable.is_empty() { Vec::new() } else { usable[attempt % usable.len()].clone() })
+}
+
+/// Results ordered: synced and the right length, synced, the right length, then the rest.
+fn ranked(results: &[Value], duration_s: f64) -> Vec<&Value> {
+    let fits = |v: &Value| duration_s <= 0.0 || v.get("duration").and_then(Value::as_f64).is_none_or(|d| (d - duration_s).abs() <= DURATION_TOLERANCE_S);
+    let synced = |v: &Value| v.get("syncedLyrics").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+    let mut v: Vec<&Value> = results.iter().collect();
+    v.sort_by_key(|r| (!(synced(r) && fits(r)), !synced(r), !fits(r)));
+    v
 }
 
 fn get(client: &HttpClient, url: &str) -> Result<String> {
@@ -147,6 +211,26 @@ mod tests {
         assert_eq!(primary_artist("Lumen Coast, Paper Sky"), "Lumen Coast");
         assert_eq!(primary_artist("A feat. B"), "A");
         assert_eq!(primary_artist("Band - Topic"), "Band");
+    }
+
+    #[test]
+    fn shifts_are_kept_per_song_and_bounded() {
+        let mut s = Shifts::default();
+        s.nudge(7, 500);
+        s.nudge(7, 500);
+        s.nudge(8, -500);
+        assert_eq!((s.get(7), s.get(8), s.get(9)), (1000, -500, 0));
+        s.nudge(8, 500);
+        assert!(!s.ms.contains_key("8"));
+        s.nudge(7, 99_000);
+        assert_eq!(s.get(7), 30_000);
+    }
+
+    #[test]
+    fn retries_rank_synced_matches_first() {
+        let r = vec![json!({"id": 1, "duration": 400.0, "plainLyrics": "x"}), json!({"id": 2, "duration": 201.0, "syncedLyrics": "[00:01.00]a"}), json!({"id": 3, "duration": 400.0, "syncedLyrics": "[00:01.00]b"})];
+        let ids: Vec<i64> = ranked(&r, 200.0).iter().map(|v| v["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
     }
 
     #[test]

@@ -1,12 +1,16 @@
 #![windows_subsystem = "windows"]
 
+mod alerts;
 mod anim;
 mod app;
 mod changelog;
+mod clips;
 mod config;
 mod dnd;
 mod events;
+mod feed;
 mod gfx;
+mod ical;
 mod lrc;
 mod lyrics;
 mod mascot;
@@ -15,11 +19,14 @@ mod notch;
 mod pages;
 mod pomodoro;
 mod profile;
+mod quiet;
 mod settings;
 mod sound;
+mod stats;
 mod store;
 mod sys;
 mod ticker;
+mod timers;
 mod tray;
 mod update;
 mod views;
@@ -69,6 +76,7 @@ fn main() {
 fn run() -> windows::core::Result<()> {
     let first_run = !config::data_dir().join("config.json").exists();
     let mut cfg: config::Config = config::load_json::<config::Config>("config.json").sanitized();
+    sys::refresh_system_accent();
     let gfx = Rc::new(gfx::Gfx::new()?);
     let events = events::init();
     let notch = notch::Notch::create(&cfg)?;
@@ -95,7 +103,17 @@ fn run() -> windows::core::Result<()> {
         lyrics: Vec::new(),
         lyrics_key: 0,
         lyrics_requested: 0,
+        lyrics_attempt: 0,
+        shifts: config::load_json("lyrics.json"),
         pomo: pomodoro::Pomodoro::new(&durations),
+        timer: timers::Countdown::new(cfg.timer_min),
+        stopwatch: timers::Stopwatch::default(),
+        stats: config::load_json("stats.json"),
+        clips: clips::Clips::new(cfg.clipboard_limit),
+        calendar: Vec::new(),
+        calendar_error: String::new(),
+        calendar_synced: None,
+        calendar_alerted: std::collections::HashSet::new(),
         notch,
         settings: None,
         events,
@@ -118,7 +136,9 @@ fn run() -> windows::core::Result<()> {
         notch::start(app);
     });
     dnd::register(hwnd);
-    media::start();
+    let (player, calendar) = app::with(|app| (app.cfg.preferred_player.clone(), app.cfg.calendar_url.clone())).unwrap_or_default();
+    media::start(player);
+    feed::start(calendar);
     sys::start_network_watch();
     sys::start_bluetooth_watch();
     sys::install_hooks();

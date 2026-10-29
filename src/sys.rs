@@ -368,6 +368,36 @@ pub fn idle_seconds() -> u32 {
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("SuiNotch");
 
+/// Windows' accent colour as 0xRRGGBB, cached; 0 means it couldn't be read.
+static SYSTEM_ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn system_accent() -> Option<u32> {
+    match SYSTEM_ACCENT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        rgb => Some(rgb & 0xFF_FFFF),
+    }
+}
+
+/// Re-reads the accent colour set in Windows; returns true when it changed.
+pub fn refresh_system_accent() -> bool {
+    let mut abgr = 0u32;
+    let mut size = 4u32;
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\DWM"),
+            w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut abgr as *mut u32 as *mut std::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    // The value is stored as 0xAABBGGRR; the top bit keeps "read" distinct from "unknown" (0).
+    let rgb = if read.is_ok() { 0x0100_0000 | ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF) } else { 0 };
+    SYSTEM_ACCENT.swap(rgb, std::sync::atomic::Ordering::Relaxed) != rgb
+}
+
 pub fn set_startup(enabled: bool) {
     unsafe {
         if enabled {
@@ -454,6 +484,40 @@ pub fn monitors() -> Vec<Monitor> {
     }
     list.sort_by_key(|m| (!m.primary, m.rect.left));
     list
+}
+
+/// Device name of the monitor holding the active window; None for the desktop, the taskbar,
+/// SuiNotch's own windows, or nothing at all.
+pub fn foreground_monitor() -> Option<String> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() || fg == GetDesktopWindow() || fg == GetShellWindow() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+            return None;
+        }
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(fg, &mut class);
+        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return None;
+        }
+        let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+        if hmon.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(hmon, &mut info as *mut _ as *mut MONITORINFO).as_bool() {
+            return None;
+        }
+        let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
+        Some(String::from_utf16_lossy(&info.szDevice[..len]))
+    }
 }
 
 pub fn pick_monitor(device: Option<&str>) -> Option<Monitor> {

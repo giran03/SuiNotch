@@ -1,7 +1,7 @@
 //! Contents of the expanded notch pages. Each function draws inside `area` (DIPs) and
 //! registers its hit regions; clicks are dispatched in `views::click`.
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local, NaiveDate, Timelike};
 use windows::core::{Interface, HSTRING};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
@@ -9,18 +9,26 @@ use windows::Win32::Graphics::Gdi::DeleteObject;
 use windows::Win32::Graphics::Imaging::{IWICBitmapSource, WICBitmapUsePremultipliedAlpha};
 use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT};
 
+use crate::alerts::EVENT_COLOR;
 use crate::app::App;
 use crate::gfx::{icon, Align, Canvas, C, R};
+use crate::ical::CalEvent;
 use crate::mascot;
 use crate::media;
 use crate::notch::{EditTarget, Hit};
-use crate::pomodoro::{self, Phase};
 use crate::store::{self, ShelfItem, Todo, TODO_COLORS};
 use crate::sys;
 use crate::views::{self, accent, bar, fmt_ms, hit, hovered, icon_button, pill_button, readable_on, DIM, FAINT, SUBTLE};
 
 pub const TODO_ROW: f32 = 31.0;
 pub const TILE_W: f32 = 96.0;
+
+mod clips;
+pub mod focus;
+mod stats;
+
+pub use focus::timer;
+pub use stats::stats;
 
 // ------------------------------------------------------------------ shared
 
@@ -146,7 +154,9 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
         return;
     }
     if app.lyrics.is_empty() {
-        cv.text("No lyrics for this song", inner, 12.5, 500, DIM, Align::Center);
+        cv.text("No lyrics for this song", R::new(inner.x, inner.cy() - 22.0, inner.w, 20.0), 12.5, 500, DIM, Align::Center);
+        let w = app.gfx.text_width("Search again", 12.5, 600) + 28.0;
+        pill_button(cv, app, R::centered(inner.cx(), inner.cy() + 14.0, w, 26.0), "Search again", Hit::LyricsRetry, false);
         return;
     }
     let cur = app.current_line();
@@ -173,75 +183,23 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
         cv.text(text, lr, size, weight, color, Align::Left);
     }
     cv.pop();
+    let (mx, my) = app.notch.mouse;
+    if r.contains(mx, my) {
+        lyrics_tools(cv, app, r);
+    }
 }
 
-// ------------------------------------------------------------------ focus timer
-
-pub fn timer(cv: &mut Canvas, app: &mut App, area: R) {
-    let d = app.durations();
-    let now = app.now_ms();
-    // A phase picked while a timer is under way is previewed at full length; the timer keeps going.
-    let preview = app.pomo.preview();
-    let shown = preview.unwrap_or(app.pomo.phase);
-    let total = pomodoro::phase_length(shown, &d).max(1);
-    let left = if preview.is_some() { total } else { app.pomo.remaining(now) };
-    let color = views::phase_color(app, shown);
-    let (cx, cy, radius) = (area.x + 64.0, area.cy() - 2.0, 58.0);
-    cv.stroke_circle(cx, cy, radius, C::WHITE.a(0.1), 7.0);
-    let frac = 1.0 - left as f32 / total as f32;
-    cv.arc(cx, cy, radius, 0.0, frac.max(0.0005) * std::f32::consts::TAU, color, 7.0);
-    cv.display(&fmt_ms(left + 999), R::centered(cx, cy - 6.0, 110.0, 34.0), 27.0, 700, C::WHITE, Align::Center);
-    cv.text(shown.label(), R::centered(cx, cy + 20.0, 110.0, 16.0), 11.5, 600, color, Align::Center);
-
-    let x0 = area.x + 152.0;
-    let w = area.right() - x0;
-    let labels = ["Focus", "Short break", "Long break"];
-    let phases = [Phase::Focus, Phase::ShortBreak, Phase::LongBreak];
-    let mut x = x0;
-    // The timer under way (running, or paused partway) keeps a dot on its chip, plus its time when out of view.
-    let under_way = !app.pomo.is_fresh(&d);
-    for (i, label) in labels.iter().enumerate() {
-        let on_screen = shown == phases[i];
-        let timing = under_way && app.pomo.phase == phases[i];
-        let text = if timing && !on_screen { format!("{label}  {}", fmt_ms(app.pomo.remaining(now) + 999)) } else { label.to_string() };
-        let dot = if timing { 12.0 } else { 0.0 };
-        let cw = app.gfx.text_width(&text, 12.0, 600) + 26.0 + dot;
-        let r = R::new(x, area.y + 4.0, cw, 28.0);
-        let h = Hit::PomoPhase(i as u8);
-        hit(app, r, h);
-        let phase_color = views::phase_color(app, phases[i]);
-        let fill = if on_screen { phase_color.a(0.24) } else if hovered(app, h) { FAINT } else { C::WHITE.a(0.05) };
-        cv.fill_rrect(r, 14.0, fill);
-        if timing {
-            cv.fill_circle(r.x + 15.0, r.cy(), 3.5, phase_color);
-        }
-        let text_r = R::new(r.x + dot, r.y, r.w - dot, r.h);
-        cv.text(&text, text_r, 12.0, 600, if on_screen || timing { C::WHITE } else { DIM }, Align::Center);
-        x += cw + 8.0;
-    }
-
-    let sessions = app.cfg.sessions_before_long;
-    let done = app.pomo.completed_focus % sessions;
-    let label = format!("Session {} of {}  ·  {} done today", done + 1, sessions, app.pomo.completed_focus);
-    cv.text(&label, R::new(x0, area.y + 44.0, w, 18.0), 12.0, 500, DIM, Align::Left);
-    for i in 0..sessions {
-        let filled = i < done;
-        let dx = x0 + 5.0 + i as f32 * 16.0;
-        cv.fill_circle(dx, area.y + 74.0, 4.5, if filled { color } else { C::WHITE.a(0.15) });
-    }
-
-    let by = area.bottom() - 34.0;
-    if preview.is_some() {
-        // Start replaces the timer under way with this phase; Back returns to it untouched.
-        pill_button(cv, app, R::new(x0, by, 112.0, 32.0), "Start", Hit::PomoToggle, true);
-        pill_button(cv, app, R::new(x0 + 120.0, by, 84.0, 32.0), "Back", Hit::PomoReset, false);
-        return;
-    }
-    let running = app.pomo.is_running();
-    let main = if running { "Pause" } else if app.pomo.is_fresh(&d) { "Start" } else { "Resume" };
-    pill_button(cv, app, R::new(x0, by, 112.0, 32.0), main, Hit::PomoToggle, true);
-    pill_button(cv, app, R::new(x0 + 120.0, by, 84.0, 32.0), "Reset", Hit::PomoReset, false);
-    pill_button(cv, app, R::new(x0 + 212.0, by, 84.0, 32.0), "Skip", Hit::PomoSkip, false);
+/// Shown while the pointer is over the lyrics: nudge timing for this song, or look again.
+fn lyrics_tools(cv: &Canvas, app: &mut App, r: R) {
+    let shift = app.media.as_ref().map(|m| app.shifts.get(m.info.track_key())).unwrap_or(0);
+    let bar = R::new(r.x + 8.0, r.bottom() - 34.0, r.w - 16.0, 28.0);
+    cv.fill_rrect(bar, 14.0, C(0.09, 0.095, 0.11, 0.96));
+    icon_button(cv, app, bar.x + 16.0, bar.cy(), 8.0, '\u{E738}', Hit::LyricsEarlier, C::WHITE);
+    let label = if shift == 0 { "In sync".to_string() } else { format!("{:+.1} s", shift as f32 / 1000.0) };
+    cv.text(&label, R::new(bar.x + 28.0, bar.y, 58.0, bar.h), 11.0, 650, DIM, Align::Center);
+    icon_button(cv, app, bar.x + 98.0, bar.cy(), 8.0, icon::ADD, Hit::LyricsLater, C::WHITE);
+    let w = app.gfx.text_width("Search again", 12.5, 600) + 24.0;
+    pill_button(cv, app, R::new(bar.right() - w - 3.0, bar.y + 3.0, w, bar.h - 6.0), "Search again", Hit::LyricsRetry, false);
 }
 
 // ------------------------------------------------------------------ water
@@ -345,8 +303,16 @@ pub fn shelf(cv: &mut Canvas, app: &mut App, area: R) {
     }
     let count = app.shelf.items.len();
     let accent = accent(app);
-    let header = format!("{count} item{}", if count == 1 { "" } else { "s" });
-    cv.text(&header, R::new(area.x, area.y - 2.0, 160.0, 20.0), 12.0, 500, DIM, Align::Left);
+    if app.cfg.clipboard_history && !app.notch.drag_over {
+        clips::tabs(cv, app, area);
+        if app.notch.shelf_tab == 1 {
+            clips::clipboard(cv, app, area);
+            return;
+        }
+    } else {
+        let header = format!("{count} item{}", if count == 1 { "" } else { "s" });
+        cv.text(&header, R::new(area.x, area.y - 2.0, 160.0, 20.0), 12.0, 500, DIM, Align::Left);
+    }
     if count > 0 && !app.notch.drag_over {
         let mut x = area.right();
         let clear_w = 62.0;
@@ -633,6 +599,15 @@ fn pill_chip(cv: &Canvas, app: &mut App, r: R, label: &str, h: Hit) {
 
 // ------------------------------------------------------------------ calendar
 
+const AGENDA_ROWS: usize = 6;
+
+/// Calendar events that touch a local day.
+fn events_on(app: &App, day: NaiveDate) -> impl Iterator<Item = &CalEvent> {
+    let from = store::at_local(day, 0, 0);
+    let to = store::at_local(day.succ_opt().unwrap_or(day), 0, 0);
+    app.calendar.iter().filter(move |e| e.start < to && (e.end > from || e.start >= from))
+}
+
 const WEEKDAYS_MON: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 const WEEKDAYS_SUN: [&str; 7] = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
@@ -675,8 +650,17 @@ pub fn calendar(cv: &mut Canvas, app: &mut App, area: R) {
         let weekend = d.weekday().number_from_monday() >= 6;
         let fg = if selected { readable_on(accent) } else if weekend { DIM } else { C::WHITE };
         cv.text(&d.day().to_string(), R::centered(cx, cy, 24.0, 18.0), 11.5, 600, fg, Align::Center);
-        if app.cfg.calendar_dots && app.todos.has_tasks_on(*d) {
-            cv.fill_circle(cx, cy + 9.5, 1.8, if selected { readable_on(accent) } else { accent });
+        if app.cfg.calendar_dots {
+            let on_dot = readable_on(accent);
+            let dots = [(app.todos.has_tasks_on(*d), if selected { on_dot } else { accent }), (events_on(app, *d).next().is_some(), if selected { on_dot } else { EVENT_COLOR })];
+            let n = dots.iter().filter(|(on, _)| *on).count() as f32;
+            let mut dx = cx - (n - 1.0) * 2.5;
+            for (on, color) in dots {
+                if on {
+                    cv.fill_circle(dx, cy + 9.5, 1.8, color);
+                    dx += 5.0;
+                }
+            }
         }
     }
 
@@ -688,13 +672,23 @@ pub fn calendar(cv: &mut Canvas, app: &mut App, area: R) {
     let title = if sel == today { "Today".to_string() } else { sel.format("%A %-d %B").to_string() };
     cv.display(&title, R::new(panel.x + 16.0, panel.y + 10.0, panel.w - 70.0, 20.0), 13.5, 700, C::WHITE, Align::Left);
     pill_button(cv, app, R::new(panel.right() - 66.0, panel.y + 9.0, 54.0, 22.0), "+ Add", Hit::CalAdd, false);
+    let events: Vec<CalEvent> = events_on(app, sel).cloned().collect();
     let tasks: Vec<Todo> = app.todos.on_day(sel).into_iter().cloned().collect();
-    if tasks.is_empty() {
-        cv.text("No tasks on this day", R::new(panel.x, panel.y + 40.0, panel.w, panel.h - 50.0), 12.0, 500, DIM, Align::Center);
+    if tasks.is_empty() && events.is_empty() {
+        cv.text("Nothing on this day", R::new(panel.x, panel.y + 40.0, panel.w, panel.h - 50.0), 12.0, 500, DIM, Align::Center);
         return;
     }
     let mut y = panel.y + 40.0;
-    for t in tasks.iter().take(6) {
+    let day_start = store::at_local(sel, 0, 0);
+    for e in events.iter().take(AGENDA_ROWS) {
+        let r = R::new(panel.x + 10.0, y, panel.w - 20.0, 26.0);
+        cv.fill_rrect(R::new(r.x + 10.0, r.y + 6.0, 4.0, r.h - 12.0), 2.0, EVENT_COLOR);
+        let time = if e.all_day || e.start < day_start { "All day".to_string() } else { sys::format_time(&store::local(e.start), app.cfg.clock_format) };
+        cv.text(&time, R::new(r.x + 26.0, r.y, 64.0, r.h), 11.5, 600, DIM, Align::Left);
+        cv.text(&e.title, R::new(r.x + 90.0, r.y, r.w - 90.0, r.h), 12.5, 550, C::WHITE, Align::Left);
+        y += 27.0;
+    }
+    for t in tasks.iter().take(AGENDA_ROWS.saturating_sub(events.len())) {
         let r = R::new(panel.x + 10.0, y, panel.w - 20.0, 26.0);
         let color = C::hex(TODO_COLORS[t.color % TODO_COLORS.len()]);
         let h = Hit::TodoCheck(t.id);

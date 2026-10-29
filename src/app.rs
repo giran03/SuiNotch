@@ -1,6 +1,7 @@
 //! Global application state, owned by the UI thread.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -10,11 +11,13 @@ use windows::Win32::Graphics::Imaging::IWICBitmapSource;
 use crate::config::{self, Config};
 use crate::events::{Event, MediaInfo};
 use crate::gfx::{Gfx, C};
+use crate::ical::CalEvent;
 use crate::lrc::Line;
 use crate::notch::Notch;
 use crate::pomodoro::{Durations, Pomodoro};
 use crate::settings::SettingsWindow;
-use crate::store::{Shelf, Todos, Water};
+use crate::stats::Stats;
+use crate::store::{self, Shelf, Todos, Water};
 use crate::sys::Audio;
 
 pub struct Media {
@@ -51,7 +54,20 @@ pub struct App {
     pub lyrics_key: u64,
     /// Track whose lyrics were last requested, so each song is looked up once.
     pub lyrics_requested: u64,
+    /// "Search again" presses for the current song.
+    pub lyrics_attempt: usize,
+    pub shifts: crate::lyrics::Shifts,
     pub pomo: Pomodoro,
+    pub timer: crate::timers::Countdown,
+    pub stopwatch: crate::timers::Stopwatch,
+    pub stats: Stats,
+    pub clips: crate::clips::Clips,
+    pub calendar: Vec<CalEvent>,
+    /// Last calendar refresh problem, shown in Settings; empty when fine.
+    pub calendar_error: String,
+    pub calendar_synced: Option<i64>,
+    /// Event occurrences already announced.
+    pub calendar_alerted: HashSet<u64>,
     pub notch: Notch,
     pub settings: Option<SettingsWindow>,
     pub events: Receiver<Event>,
@@ -72,6 +88,7 @@ thread_local! {
 /// Work that must run while the app is not borrowed (modal loops, window creation).
 pub enum Deferred {
     DragOut(Vec<usize>),
+    DragClip(usize),
     OpenSettings(Option<usize>),
     Exit,
 }
@@ -103,6 +120,7 @@ fn run_deferred() {
     for job in jobs {
         match job {
             Deferred::DragOut(indices) => crate::dnd::drag_out(indices),
+            Deferred::DragClip(i) => crate::dnd::drag_clip(i),
             Deferred::OpenSettings(page) => crate::settings::open(page),
             Deferred::Exit => unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) },
         }
@@ -130,6 +148,42 @@ impl App {
     pub fn save_shelf(&self) {
         config::save_json("shelf.json", &self.shelf);
     }
+    pub fn save_stats(&self) {
+        config::save_json("stats.json", &self.stats);
+    }
+    pub fn save_shifts(&self) {
+        config::save_json("lyrics.json", &self.shifts);
+    }
+
+    /// Any Focus tab clock is counting: Pomodoro, timer or stopwatch.
+    pub fn focus_running(&self) -> bool {
+        self.pomo.is_running() || self.timer.is_running() || self.stopwatch.is_running()
+    }
+
+    /// Ticks or unticks a task, counts it in today's stats, and lets Sui cheer a cleared day.
+    pub fn toggle_task(&mut self, id: u64, now: i64) {
+        let before = self.todos.get(id).map(|t| (t.done, t.done_at));
+        self.todos.toggle(id, now);
+        let today = store::day_of(now);
+        match before {
+            Some((false, _)) => self.stats.task_done(today, true),
+            Some((true, Some(at))) if store::day_of(at) == today => self.stats.task_done(today, false),
+            _ => {}
+        }
+        self.save_todos();
+        self.save_stats();
+        let (done, total) = self.todos.today_progress(now);
+        if before.is_some_and(|(was_done, _)| !was_done) && total > 0 && done == total {
+            crate::notch::cheer(self);
+        }
+    }
+
+    /// Playback position to match lyric lines against: a little ahead, minus this song's shift.
+    pub fn lyric_pos(&self) -> Option<u64> {
+        let m = self.media.as_ref()?;
+        let shift = self.shifts.get(m.info.track_key());
+        Some((m.position_ms() as i64 + 250 - shift).max(0) as u64)
+    }
 
     /// Applies a settings change everywhere and persists it.
     pub fn set_config(&mut self, new: Config) {
@@ -148,7 +202,7 @@ impl App {
         if self.lyrics_key != m.info.track_key() {
             return None;
         }
-        crate::lrc::current(&self.lyrics, m.position_ms() + 250)
+        crate::lrc::current(&self.lyrics, self.lyric_pos()?)
     }
 }
 

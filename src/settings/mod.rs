@@ -34,6 +34,7 @@ pub const ABOUT_PAGE: usize = 10;
 pub const CHANGELOG_PAGE: usize = 11;
 pub const DEVELOPER: &str = "CafeTako";
 pub const SUPPORT_EMAIL: &str = "support@cafetako.com";
+pub const COFFEE_URL: &str = "https://buymeacoffee.com/cafetako";
 const W: f32 = 800.0;
 const H: f32 = 580.0;
 const SIDEBAR: f32 = 228.0;
@@ -82,12 +83,18 @@ enum Act {
     Seg(IndexField, usize),
     Step(NumField, i32, u32, u32),
     Display(Option<usize>),
+    DisplayFollow,
+    PasteCalendar,
+    RefreshCalendar,
+    RemoveCalendar,
+    ClearClips,
     Accent(usize),
     OpenData,
     ClearShelf,
     ResetWater,
     Website,
     Support,
+    Coffee,
     CheckUpdate,
     InstallUpdate,
 }
@@ -105,6 +112,8 @@ pub struct SettingsWindow {
     segs: HashMap<usize, Spring>,
     side_sel: Spring,
     monitors: Vec<Monitor>,
+    /// Roundness step the window corners were last set for.
+    corners: usize,
     mouse: (f32, f32),
     last: Instant,
     scale: f32,
@@ -148,6 +157,7 @@ pub fn open(page: Option<usize>) {
             segs: HashMap::new(),
             side_sel: Spring::new(page as f32, 0.3, 0.86),
             monitors: sys::monitors(),
+            corners: usize::MAX,
             mouse: (-1.0, -1.0),
             last: Instant::now(),
             scale: scale.max(1.0),
@@ -199,8 +209,6 @@ fn create_window() -> Result<HWND> {
         )?;
         let dark: BOOL = true.into();
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
-        let corner = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const _, 4);
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
         Ok(hwnd)
     }
@@ -393,8 +401,46 @@ fn act(app: &mut App, a: Act) {
         }
         Act::Display(i) => {
             c.display = i.and_then(|i| app.settings.as_ref().and_then(|s| s.monitors.get(i)).map(|m| m.device.clone()));
+            c.display_follow = false;
         }
-        Act::Accent(i) => c.accent = i,
+        Act::DisplayFollow => c.display_follow = true,
+        Act::PasteCalendar => match crate::notch::clipboard_text().as_deref().and_then(crate::feed::normalize) {
+            Some(url) => {
+                c.calendar_url = url.clone();
+                app.calendar_error.clear();
+                app.calendar_synced = None;
+                app.calendar_alerted.clear();
+                crate::feed::set_url(url);
+            }
+            None => {
+                app.calendar_error = "Copy the calendar's iCal link first, then press Paste".into();
+                if let Some(s) = &app.settings {
+                    invalidate(s);
+                }
+                return;
+            }
+        },
+        Act::RefreshCalendar => {
+            crate::feed::refresh_now();
+            return;
+        }
+        Act::RemoveCalendar => {
+            c.calendar_url.clear();
+            app.calendar.clear();
+            app.calendar_error.clear();
+            app.calendar_synced = None;
+            crate::feed::set_url(String::new());
+        }
+        Act::ClearClips => {
+            app.clips.clear();
+            app.notch.bitmaps.clear();
+            crate::notch::notice(app, "Clipboard history cleared");
+            return;
+        }
+        Act::Accent(i) => {
+            c.accent = i;
+            c.accent_follow_system = false;
+        }
         Act::OpenData => {
             let dir = config::data_dir();
             let _ = std::fs::create_dir_all(&dir);
@@ -420,6 +466,10 @@ fn act(app: &mut App, a: Act) {
             sys::open_url("https://lrclib.net");
             return;
         }
+        Act::Coffee => {
+            sys::open_url(COFFEE_URL);
+            return;
+        }
         Act::Support => {
             sys::open_url(&format!("mailto:{SUPPORT_EMAIL}?subject=SuiNotch%20{}", env!("CARGO_PKG_VERSION")));
             return;
@@ -435,7 +485,7 @@ fn act(app: &mut App, a: Act) {
             return;
         }
     }
-    let accent_changed = c.accent != app.cfg.accent;
+    let accent_changed = c.accent_rgb() != app.cfg.accent_rgb();
     app.set_config(c);
     if accent_changed {
         crate::tray::refresh_icon(app);
@@ -467,6 +517,11 @@ fn paint_window(app: &mut App, s: &mut SettingsWindow) -> Result<()> {
     }
     let rt = s.rt.clone().expect("render target");
     let gfx = app.gfx.clone();
+    if s.corners != app.cfg.roundness {
+        s.corners = app.cfg.roundness;
+        set_corners(s.hwnd, s.corners);
+    }
+    let round = app.cfg.roundness();
     s.side_sel.set(s.page.min(ABOUT_PAGE) as f32);
     let mut moving = s.scroll.step(dt) | s.side_sel.step(dt);
     unsafe { rt.BeginDraw() };
@@ -475,8 +530,8 @@ fn paint_window(app: &mut App, s: &mut SettingsWindow) -> Result<()> {
         let mut cv = Canvas::new(&gfx, target)?;
         s.hits.clear();
         cv.clear(BG);
-        draw_sidebar(&cv, s);
-        let mut ui = Ui { cv: &mut cv, s, y: 0.0, x: SIDEBAR + 28.0, w: W - SIDEBAR - 56.0, row_index: 0, moving: false, dt };
+        draw_sidebar(&cv, s, round);
+        let mut ui = Ui { cv: &mut cv, s, y: 0.0, x: SIDEBAR + 28.0, w: W - SIDEBAR - 56.0, row_index: 0, moving: false, dt, round };
         ui.page(app);
         moving |= ui.moving;
         draw_title_buttons(&cv, s);
@@ -499,7 +554,15 @@ fn hovered(s: &SettingsWindow, a: Act) -> bool {
     s.hover == Some(a)
 }
 
-fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow) {
+/// Window corners follow the Appearance roundness: Soft gets Windows' small corners.
+fn set_corners(hwnd: HWND, roundness: usize) {
+    let corner = if roundness == 0 { DWMWCP_ROUNDSMALL } else { DWMWCP_ROUND };
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const _, 4);
+    }
+}
+
+fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow, round: f32) {
     cv.fill_rect(R::new(0.0, 0.0, SIDEBAR, H), SIDE);
     cv.line(SIDEBAR, 0.0, SIDEBAR, H, LINE, 1.0);
     // Brand
@@ -513,16 +576,16 @@ fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow) {
     let (a, b) = (p.floor() as usize, (p.ceil() as usize).min(ABOUT_PAGE));
     let t = p - p.floor();
     let sel_y = y_of(a) + (y_of(b) - y_of(a)) * t;
-    cv.fill_rrect(R::new(12.0, sel_y, SIDEBAR - 24.0, item_h - 2.0), 9.0, C::WHITE.a(0.09));
+    cv.fill_rrect(R::new(12.0, sel_y, SIDEBAR - 24.0, item_h - 2.0), 9.0 * round, C::WHITE.a(0.09));
     for (i, cat) in CATEGORIES.iter().enumerate() {
         let r = R::new(12.0, y_of(i), SIDEBAR - 24.0, item_h - 2.0);
         s.hits.push((r, Act::Page(i)));
         let current = s.page.min(ABOUT_PAGE) == i;
         if hovered(s, Act::Page(i)) && !current {
-            cv.fill_rrect(r, 9.0, C::WHITE.a(0.04));
+            cv.fill_rrect(r, 9.0 * round, C::WHITE.a(0.04));
         }
         let tile = R::new(r.x + 8.0, r.cy() - 11.0, 22.0, 22.0);
-        cv.fill_rrect(tile, 6.0, C::hex(cat.tile));
+        cv.fill_rrect(tile, 6.0 * round, C::hex(cat.tile));
         if cat.glyph == '\u{0}' {
             crate::pages::water_icon(cv, tile.cx(), tile.cy(), 12.0, C::WHITE);
         } else {

@@ -121,6 +121,8 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 notch::request_frame(app);
                 return;
             }
+            // Drops always land on the shelf, so show it rather than the clipboard tab.
+            app.notch.shelf_tab = 0;
             let added = if !paths.is_empty() {
                 app.shelf.add_paths(&paths) > 0
             } else {
@@ -192,6 +194,32 @@ fn text_object(text: &str) -> Option<IDataObject> {
 }
 
 /// Runs the system drag loop for the given shelf items. Must be called with the app unborrowed.
+/// Drags a clipboard-history item out: its text, or its image as a file.
+pub fn drag_clip(i: usize) {
+    use crate::clips::Clip;
+    let Some((hwnd, clip)) = app::with(|app| {
+        app.notch.own_drag = true;
+        (app.notch.hwnd, app.clips.items.get(i).cloned())
+    }) else {
+        return;
+    };
+    let data = match &clip {
+        Some(Clip::Text(t)) => text_object(t),
+        Some(Clip::Image { path, .. }) => files_object(std::slice::from_ref(path)),
+        None => None,
+    };
+    if let Some(d) = data {
+        unsafe {
+            let _ = SHDoDragDrop(Some(hwnd), &d, None::<&IDropSource>, DROPEFFECT_COPY);
+        }
+    }
+    app::with(|app| {
+        app.notch.own_drag = false;
+        app.notch.drag_over = false;
+        notch::request_frame(app);
+    });
+}
+
 pub fn drag_out(indices: Vec<usize>) {
     let Some((hwnd, items)) = app::with(|app| {
         app.notch.own_drag = true;

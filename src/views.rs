@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::app::{App, Deferred};
 use crate::gfx::{icon, Align, Canvas, C, R};
 use crate::media::{self, Command};
-use crate::notch::{self, AlertKind, EditTarget, Hit, Hud, Notch, Page, TextField};
+use crate::notch::{self, EditTarget, Hit, Hud, Notch, Page, TextField};
 use crate::pages;
 use crate::pomodoro::Phase;
 use crate::store;
@@ -117,7 +117,7 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
     cv.push_clip_rect(body);
     hit(app, body, Hit::Body);
     if app.notch.alert.is_some() {
-        draw_alert(cv, app, body);
+        crate::alerts::draw(cv, app, body);
     } else if let Some((h, _)) = app.notch.hud.clone() {
         draw_hud(cv, app, body, &h);
     } else {
@@ -153,7 +153,7 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
 fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
     let cy = body.h / 2.0;
     let accent = accent(app);
-    if notch::mascot_visible(app) {
+    if notch::mascot_visible(app) || notch::sui_reacting(app) {
         let body_color = C::hex(0xEAF6FF).mix(accent, 0.25);
         app.notch.mascot.draw(cv, body.cx(), cy - 1.0, 19.0, body_color);
         return;
@@ -178,21 +178,65 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
         } else {
             cv.glyph(if playing { icon::PLAY } else { icon::PAUSE }, ex + 7.0, cy, 10.0, DIM);
         }
+        closed_track(cv, app, R::new(art.right() + 10.0, 0.0, ex - 12.0 - (art.right() + 10.0), body.h));
         return;
     }
     if app.pomo.is_running() {
         let d = app.durations();
         let left = app.pomo.remaining(app.now_ms());
         let frac = 1.0 - left as f32 / app.pomo.length(&d).max(1) as f32;
-        let (x, color) = (body.x + 22.0, phase_color(app, app.pomo.phase));
-        cv.stroke_circle(x, cy, 7.5, C::WHITE.a(0.16), 2.4);
-        cv.arc(x, cy, 7.5, 0.0, frac * std::f32::consts::TAU, color, 2.4);
-        cv.text(&fmt_ms(left + 999), R::new(body.right() - 80.0, 0.0, 64.0, body.h), 13.0, 650, C::WHITE, Align::Right);
+        if notch::sui_napping(app) {
+            // Sui naps through the long break beside the countdown.
+            let body_color = C::hex(0xEAF6FF).mix(accent, 0.25);
+            app.notch.mascot.draw_dozing(cv, app.started.elapsed().as_secs_f32(), body.x + 24.0, cy - 1.0, 16.0, body_color);
+            cv.text(&fmt_ms(left + 999), R::new(body.right() - 80.0, 0.0, 64.0, body.h), 13.0, 650, C::WHITE, Align::Right);
+        } else {
+            closed_clock(cv, body, cy, Some(frac), phase_color(app, app.pomo.phase), &fmt_ms(left + 999));
+        }
+        return;
+    }
+    if app.timer.is_running() {
+        let left = app.timer.remaining(app.now_ms());
+        let frac = 1.0 - left as f32 / app.timer.length_ms.max(1) as f32;
+        closed_clock(cv, body, cy, Some(frac), accent, &fmt_ms(left + 999));
+        return;
+    }
+    if app.stopwatch.is_running() {
+        let ms = app.stopwatch.elapsed(app.now_ms());
+        closed_clock(cv, body, cy, None, accent, &fmt_ms(ms));
         return;
     }
     let now = chrono::Local::now();
     let time = crate::sys::format_time(&now, app.cfg.clock_format);
     cv.display(&time, R::new(body.x, 0.0, body.w, body.h), 13.5, 650, C::WHITE, Align::Center);
+}
+
+/// The song title in the closed notch, then the artist in the space that's left.
+fn closed_track(cv: &Canvas, app: &App, r: R) {
+    let Some(info) = app.media.as_ref().map(|m| &m.info) else { return };
+    if r.w < 24.0 {
+        return;
+    }
+    let (title, artist) = if info.title.trim().is_empty() { (info.artist.as_str(), "") } else { (info.title.as_str(), info.artist.as_str()) };
+    let title_w = app.gfx.text_width(title, 12.5, 600).min(r.w);
+    cv.text(title, R::new(r.x, r.y, title_w + 1.0, r.h), 12.5, 600, C::WHITE, Align::Left);
+    let rest = r.w - title_w - 8.0;
+    if !artist.is_empty() && rest > 40.0 {
+        cv.text(artist, R::new(r.x + title_w + 8.0, r.y, rest, r.h), 12.0, 500, DIM, Align::Left);
+    }
+}
+
+/// A small progress ring (or a stopwatch glyph without progress) and the time, in the closed notch.
+fn closed_clock(cv: &Canvas, body: R, cy: f32, frac: Option<f32>, color: C, time: &str) {
+    let x = body.x + 22.0;
+    match frac {
+        Some(f) => {
+            cv.stroke_circle(x, cy, 7.5, C::WHITE.a(0.16), 2.4);
+            cv.arc(x, cy, 7.5, 0.0, f * std::f32::consts::TAU, color, 2.4);
+        }
+        None => cv.glyph(icon::TIMER, x, cy, 12.0, color),
+    }
+    cv.text(time, R::new(body.right() - 80.0, 0.0, 64.0, body.h), 13.0, 650, C::WHITE, Align::Right);
 }
 
 pub fn phase_color(app: &App, phase: Phase) -> C {
@@ -265,6 +309,14 @@ fn draw_hud(cv: &mut Canvas, app: &mut App, body: R, hud: &Hud) {
             cv.text(name, R::new(ix + 20.0, 0.0, body.w - 130.0, body.h), size, 600, C::WHITE, Align::Left);
             cv.text(if *connected { "Connected" } else { "Disconnected" }, right_r, 12.0, 500, DIM, Align::Right);
         }
+        Hud::Clipboard { image, preview } => {
+            cv.glyph(if *image { icon::IMAGE } else { icon::CLIPBOARD }, ix, cy, 13.0, accent);
+            let label = if *image { "Image copied" } else { "Copied" };
+            let lw = app.gfx.text_width(label, size, 600) + 12.0;
+            cv.text(label, R::new(ix + 18.0, 0.0, lw, body.h), size, 600, C::WHITE, Align::Left);
+            let px = ix + 18.0 + lw;
+            cv.text(preview, R::new(px, 0.0, body.right() - 18.0 - px, body.h), 12.0, 500, DIM, Align::Left);
+        }
     }
 }
 
@@ -275,61 +327,6 @@ pub fn battery_icon(cv: &Canvas, cx: f32, cy: f32, percent: u8, charging: bool, 
     let col = if charging { C::hex(0x34C759) } else if percent <= 20 { C::hex(0xFF6B5A) } else { accent.mix(C::WHITE, 0.6) };
     let inner = r.inset(2.0, 2.0);
     cv.fill_rrect(R::new(inner.x, inner.y, (inner.w * percent as f32 / 100.0).max(1.5), inner.h), 1.5, col);
-}
-
-// ------------------------------------------------------------------ alerts
-
-fn draw_alert(cv: &mut Canvas, app: &mut App, body: R) {
-    let Some((kind, since)) = app.notch.alert else { return };
-    let accent = accent(app);
-    let appear = (since.elapsed().as_secs_f32() / 0.25).clamp(0.0, 1.0);
-    cv.push_opacity(appear);
-    let (glyph, color, title, sub, primary, secondary): (char, C, String, String, String, String) = match kind {
-        AlertKind::Todo(id) => {
-            let task = app.todos.get(id).map(|t| t.title.clone()).unwrap_or_default();
-            let color = app.todos.get(id).map(|t| C::hex(store::TODO_COLORS[t.color % store::TODO_COLORS.len()])).unwrap_or(accent);
-            (icon::BELL, color, "Time's up!".into(), task, "Done".into(), format!("Snooze {} min", app.cfg.snooze_min()))
-        }
-        AlertKind::Water => {
-            let now = store::now();
-            let sub = format!("{:.2} of {:.1} L so far today", app.water.today(now) as f32 / 1000.0, app.cfg.goal_ml as f32 / 1000.0);
-            ('\u{E81E}', C::hex(0x3BA7FF), "Time for some water".into(), sub, format!("Drink {} ml", app.cfg.glass_ml), "Later".into())
-        }
-        AlertKind::Pomodoro(Phase::Focus) => {
-            let next = app.pomo.phase;
-            let mins = match next {
-                Phase::LongBreak => app.cfg.long_break_min,
-                _ => app.cfg.short_break_min,
-            };
-            let primary = if app.pomo.is_running() { "Got it".to_string() } else { "Start break".to_string() };
-            (icon::TIMER, phase_color(app, Phase::Focus), "Focus session done".into(), format!("Take a {mins} minute break"), primary, "Skip break".into())
-        }
-        AlertKind::Pomodoro(_) => {
-            let primary = if app.pomo.is_running() { "Got it".to_string() } else { "Start focus".to_string() };
-            (icon::TIMER, accent, "Break's over".into(), format!("Ready for {} minutes of focus?", app.cfg.focus_min), primary, "Later".into())
-        }
-        AlertKind::LowBattery(p) => (icon::POWER, C::hex(0xFF6B5A), "Battery low".into(), format!("{p}% left. Plug in your charger soon."), "OK".into(), String::new()),
-    };
-    let ic = (body.x + 40.0, 50.0);
-    cv.fill_circle(ic.0, ic.1, 21.0, color.a(0.2));
-    if kind == AlertKind::Water {
-        crate::pages::water_icon(cv, ic.0, ic.1, 20.0, color);
-    } else {
-        cv.glyph(glyph, ic.0, ic.1, 17.0, color);
-    }
-    let tx = body.x + 74.0;
-    cv.display(&title, R::new(tx, 18.0, body.w - 120.0, 22.0), 15.5, 700, C::WHITE, Align::Left);
-    cv.text(&sub, R::new(tx, 40.0, body.w - 100.0, 18.0), 12.5, 500, DIM, Align::Left);
-    let by = body.bottom() - 40.0;
-    let pw = app.gfx.text_width(&primary, 12.5, 600) + 30.0;
-    let pr = R::new(body.right() - 22.0 - pw, by, pw, 28.0);
-    pill_button(cv, app, pr, &primary, Hit::AlertPrimary, true);
-    if !secondary.is_empty() {
-        let sw = app.gfx.text_width(&secondary, 12.5, 600) + 30.0;
-        pill_button(cv, app, R::new(pr.x - 8.0 - sw, by, sw, 28.0), &secondary, Hit::AlertSecondary, false);
-    }
-    icon_button(cv, app, body.right() - 24.0, 22.0, 9.0, icon::CLOSE, Hit::AlertClose, DIM);
-    cv.pop();
 }
 
 // ------------------------------------------------------------------ lyrics pill
@@ -378,6 +375,7 @@ fn draw_expanded(cv: &mut Canvas, app: &mut App, body: R) {
             Page::Shelf => pages::shelf(cv, app, area),
             Page::Todo => pages::todo(cv, app, area),
             Page::Calendar => pages::calendar(cv, app, area),
+            Page::Stats => pages::stats(cv, app, area),
         }
         cv.pop();
         if d.abs() > 0.45 {
@@ -457,7 +455,8 @@ pub fn todo_overflow(app: &App) -> f32 {
 
 pub fn shelf_overflow(app: &App) -> f32 {
     let (w, _) = Page::Shelf.size(false);
-    let total = app.shelf.items.len() as f32 * (pages::TILE_W + 10.0);
+    let n = if app.notch.shelf_tab == 1 && app.cfg.clipboard_history { app.clips.items.len() } else { app.shelf.items.len() };
+    let total = n as f32 * (pages::TILE_W + 10.0);
     (total - (w - 48.0)).max(0.0)
 }
 
@@ -486,6 +485,29 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::Source => media::command(Command::NextSource),
         Hit::Seek | Hit::VolumeBar => {}
         Hit::LyricsToggle => app.notch.lyrics_view = !app.notch.lyrics_view,
+        Hit::LyricsEarlier | Hit::LyricsLater => {
+            if let Some(key) = app.media.as_ref().map(|m| m.info.track_key()) {
+                let step = if h == Hit::LyricsLater { crate::lyrics::SHIFT_STEP_MS } else { -crate::lyrics::SHIFT_STEP_MS };
+                app.shifts.nudge(key, step);
+                app.save_shifts();
+            }
+        }
+        Hit::LyricsRetry => {
+            if let Some(info) = app.media.as_ref().map(|m| m.info.clone()) {
+                app.lyrics_attempt += 1;
+                app.lyrics.clear();
+                app.lyrics_key = 0;
+                crate::lyrics::fetch(info, app.lyrics_attempt);
+            }
+        }
+        Hit::FocusMode(_)
+        | Hit::TimerPreset(_)
+        | Hit::TimerStep(_)
+        | Hit::TimerToggle
+        | Hit::TimerReset
+        | Hit::WatchToggle
+        | Hit::WatchLap
+        | Hit::WatchReset => pages::focus::click(app, h),
         Hit::Volume => {
             if let Some(a) = app.audio.as_ref() {
                 a.toggle_mute();
@@ -533,6 +555,24 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             }
         }
         Hit::ShelfItem(i) => shelf_click(app, i, ctrl, shift),
+        Hit::ShelfTab(t) => {
+            app.notch.shelf_tab = t;
+            app.notch.shelf_scroll.snap(0.0);
+            app.notch.shelf_sel.clear();
+            app.notch.shelf_selecting = false;
+        }
+        Hit::ClipItem(i) => {
+            if let Some(clip) = app.clips.items.get(i).cloned() {
+                if crate::clips::copy_back(app.notch.hwnd, &clip) {
+                    notch::notice(app, "Copied");
+                }
+            }
+        }
+        Hit::ClipClear => {
+            app.clips.clear();
+            app.notch.bitmaps.clear();
+            app.notch.shelf_scroll.snap(0.0);
+        }
         Hit::ShelfSelect => {
             app.notch.shelf_selecting = !app.notch.shelf_selecting;
             app.notch.shelf_sel.clear();
@@ -551,8 +591,7 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             }
         }
         Hit::TodoCheck(id) => {
-            app.todos.toggle(id, now);
-            app.save_todos();
+            app.toggle_task(id, now);
             notch::schedule(app);
         }
         Hit::TodoTitle(id) => {
@@ -622,20 +661,21 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             app.notch.field = Some(TextField { target: EditTarget::NewTask, text: String::new(), caret: 0 });
             notch::set_page(app, Page::Todo);
         }
-        Hit::AlertPrimary => alert_action(app, true),
-        Hit::AlertSecondary => alert_action(app, false),
+        Hit::AlertPrimary => crate::alerts::action(app, true),
+        Hit::AlertSecondary => crate::alerts::action(app, false),
         Hit::AlertClose => app.notch.alert = None,
     }
     notch::request_frame(app);
 }
 
-fn drink(app: &mut App, now: i64) {
+pub fn drink(app: &mut App, now: i64) {
     let before = app.water.today(now);
     app.water.drink(now, app.cfg.glass_ml);
     app.save_water();
     app.notch.water_fill.kick(-1.2);
     if before < app.cfg.goal_ml && app.water.today(now) >= app.cfg.goal_ml {
         notch::notice(app, "Daily goal reached");
+        notch::cheer(app);
     }
     notch::schedule(app);
 }
@@ -703,43 +743,4 @@ fn quick_due(k: u8, now: i64) -> Option<i64> {
         }
         _ => store::at_local(today.succ_opt().unwrap_or(today), 9, 0),
     })
-}
-
-fn alert_action(app: &mut App, primary: bool) {
-    let Some((kind, _)) = app.notch.alert.take() else { return };
-    let now = store::now();
-    match kind {
-        AlertKind::Todo(id) => {
-            if primary {
-                if app.todos.get(id).is_some_and(|t| !t.done) {
-                    app.todos.toggle(id, now);
-                }
-            } else {
-                let m = app.cfg.snooze_min();
-                app.todos.snooze(id, now, m);
-            }
-            app.save_todos();
-        }
-        AlertKind::Water => {
-            if primary {
-                drink(app, now);
-            } else {
-                app.water.snoozed_until = Some(now + 15 * 60);
-                app.save_water();
-            }
-        }
-        AlertKind::Pomodoro(_) => {
-            let n = app.now_ms();
-            if primary && !app.pomo.is_running() {
-                app.pomo.start(n);
-            } else if !primary {
-                if app.pomo.phase != Phase::Focus {
-                    let d = app.durations();
-                    app.pomo.switch(Phase::Focus, &d);
-                }
-            }
-        }
-        AlertKind::LowBattery(_) => {}
-    }
-    notch::schedule(app);
 }

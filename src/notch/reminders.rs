@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// How long before a calendar event its heads-up appears.
+const EVENT_LEAD_S: i64 = 10 * 60;
+/// While Windows is quiet, held reminders are checked again this often.
+const QUIET_RECHECK_MS: u64 = 60_000;
+
 /// Arms one timer for the earliest of: water reminder, task reminder, focus timer end.
 pub fn schedule(app: &mut App) {
     let now = store::now();
@@ -15,6 +20,16 @@ pub fn schedule(app: &mut App) {
     let mut ms: u64 = next.map(|t| ((t - now).max(0) as u64) * 1000).unwrap_or(3_600_000);
     if let Some(end) = app.pomo.ends_at() {
         ms = ms.min(end.saturating_sub(app.now_ms()));
+    }
+    if let Some(end) = app.timer.ends_at() {
+        ms = ms.min(end.saturating_sub(app.now_ms()));
+    }
+    if let Some(t) = next_event_alert(app, now) {
+        ms = ms.min(((t - now).max(0) as u64) * 1000);
+    }
+    if app.cfg.respect_quiet && crate::quiet::active() {
+        // Reminders held back by Do Not Disturb go out soon after it ends.
+        ms = ms.min(QUIET_RECHECK_MS);
     }
     // Re-check at least hourly so a new day and sleep/resume are picked up.
     let ms = ms.clamp(50, 3_600_000);
@@ -34,12 +49,33 @@ pub(super) fn on_schedule(app: &mut App) {
             app.save_todos();
         }
     }
+    let quiet = app.cfg.respect_quiet && crate::quiet::active();
     if let Some(phase) = app.pomo.poll(app.now_ms()) {
         let d = app.durations();
+        if phase == Phase::Focus {
+            app.stats.add_focus(today, (d.focus_ms / 60_000) as u32);
+            app.save_stats();
+            cheer(app);
+        }
         let auto = if phase == Phase::Focus { app.cfg.auto_start_breaks } else { app.cfg.auto_start_focus };
         let now_ms = app.now_ms();
         app.pomo.advance(now_ms, &d, auto);
         show_alert(app, AlertKind::Pomodoro(phase));
+    }
+    if app.timer.poll(app.now_ms()) {
+        show_alert(app, AlertKind::Timer);
+    }
+    if quiet {
+        // Tasks, water and events wait; the Pomodoro and timer above still finish, silently.
+        schedule(app);
+        request_frame(app);
+        return;
+    }
+    for id in due_events(app, now) {
+        app.calendar_alerted.insert(id);
+        if app.notch.alert.is_none() {
+            show_alert(app, AlertKind::Event(id));
+        }
     }
     for id in app.todos.due_alerts(now) {
         if let Some(t) = app.todos.get_mut(id) {
@@ -62,6 +98,29 @@ pub(super) fn on_schedule(app: &mut App) {
     }
     schedule(app);
     request_frame(app);
+}
+
+/// When the next event heads-up is due: an unannounced timed event, shortly before it starts.
+fn next_event_alert(app: &App, now: i64) -> Option<i64> {
+    if !app.cfg.calendar_reminders {
+        return None;
+    }
+    app.calendar
+        .iter()
+        .filter(|e| !e.all_day && e.start > now && !app.calendar_alerted.contains(&e.id))
+        .map(|e| (e.start - EVENT_LEAD_S).max(now))
+        .min()
+}
+
+fn due_events(app: &App, now: i64) -> Vec<u64> {
+    if !app.cfg.calendar_reminders {
+        return Vec::new();
+    }
+    app.calendar
+        .iter()
+        .filter(|e| !e.all_day && e.start > now && e.start - EVENT_LEAD_S <= now && !app.calendar_alerted.contains(&e.id))
+        .map(|e| e.id)
+        .collect()
 }
 
 // ------------------------------------------------------------------ events from background threads
@@ -89,9 +148,10 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
             let key = info.track_key();
             if key != app.lyrics_requested {
                 app.lyrics_requested = key;
+                app.lyrics_attempt = 0;
                 app.lyrics.clear();
                 app.lyrics_key = 0;
-                crate::lyrics::fetch(info.clone());
+                crate::lyrics::fetch(info.clone(), 0);
             }
             app.media = Some(app::Media { info, at: Instant::now() });
             true
@@ -151,6 +211,24 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
             app.update = status;
             crate::settings::refresh(app);
             false
+        }
+        Event::PlayerPicked(id) => {
+            app.cfg.preferred_player = id;
+            app.save_config();
+            false
+        }
+        Event::Calendar { events, error } => {
+            if let Some(events) = events {
+                app.calendar = events;
+                app.calendar_synced = Some(store::now());
+                app.calendar_error.clear();
+            }
+            if let Some(e) = error {
+                app.calendar_error = e;
+            }
+            schedule(app);
+            crate::settings::refresh(app);
+            true
         }
     }
 }

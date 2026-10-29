@@ -105,7 +105,7 @@ pub(super) fn frame(app: &mut App) {
         morphing |= m && i < MORPH_SPRINGS;
     }
     let idle_s = sys::idle_seconds();
-    let mascot_visible = mascot_visible(app);
+    let mascot_visible = mascot_visible(app) || sui_reacting(app);
     if mascot_visible {
         moving |= app.notch.mascot.update(idle_s, dt);
     }
@@ -158,9 +158,19 @@ pub fn mascot_visible(app: &App) -> bool {
         && app.notch.alert.is_none()
         && app.notch.hud.is_none()
         && app.media.is_none()
-        && !app.pomo.is_running()
+        && !app.focus_running()
         && !app.cfg.minimal
         && app.notch.idle_mode
+}
+
+/// Sui is cheering: shown in the closed notch, or in the alert that called for it.
+pub fn sui_reacting(app: &App) -> bool {
+    app.cfg.mascot && app.cfg.sui_reactions && app.notch.mascot.mood == crate::mascot::Mood::Cheering && !app.notch.expanded && app.notch.hud.is_none()
+}
+
+/// A long break is running and Sui naps beside it in the closed notch.
+pub fn sui_napping(app: &App) -> bool {
+    app.cfg.mascot && app.cfg.sui_reactions && app.pomo.is_running() && app.pomo.phase == Phase::LongBreak
 }
 
 /// How long nothing needs drawing, from whatever changes next on screen.
@@ -183,17 +193,28 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
             }
             if let Some(i) = app.current_line() {
                 if let Some(line) = app.lyrics.get(i + 1) {
-                    let pos = m.position_ms() + 250;
+                    let pos = app.lyric_pos().unwrap_or(0);
                     next = next.min(line.at_ms.saturating_sub(pos).max(16));
                 }
             } else if let Some(first) = app.lyrics.first() {
-                next = next.min(first.at_ms.saturating_sub(m.position_ms() + 250).max(16));
+                next = next.min(first.at_ms.saturating_sub(app.lyric_pos().unwrap_or(0)).max(16));
             }
         }
     }
     if app.pomo.is_running() {
         let ms_left = app.pomo.remaining(app.now_ms());
         next = next.min(if n.expanded { 200 } else { (ms_left % 1000).max(16) });
+        if !n.expanded && sui_napping(app) {
+            next = next.min(80);
+        }
+    }
+    if app.timer.is_running() {
+        let ms_left = app.timer.remaining(app.now_ms());
+        next = next.min(if n.expanded { 200 } else { (ms_left % 1000).max(16) });
+    }
+    if app.stopwatch.is_running() {
+        let ms = app.stopwatch.elapsed(app.now_ms());
+        next = next.min(if n.expanded && n.page == Page::Timer { 100 - ms % 100 } else { 1000 - ms % 1000 }.max(16));
     }
     if let Some((_, since)) = &n.hud {
         let until = *since + Duration::from_millis(app.cfg.hud_ms() as u64);

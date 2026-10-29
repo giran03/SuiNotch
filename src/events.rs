@@ -52,6 +52,10 @@ pub enum Event {
     Network { connected: bool, name: String },
     Bluetooth { name: String, connected: bool },
     Update(crate::update::Status),
+    /// The player picked with the Music page switch, to be remembered.
+    PlayerPicked(String),
+    /// Calendar link refreshed: new events, or an error that keeps the old ones.
+    Calendar { events: Option<Vec<crate::ical::CalEvent>>, error: Option<String> },
 }
 
 static SENDER: OnceLock<Mutex<Sender<Event>>> = OnceLock::new();

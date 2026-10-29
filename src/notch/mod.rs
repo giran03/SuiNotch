@@ -27,10 +27,12 @@ use crate::sys::{self, Monitor};
 use crate::views;
 
 mod input;
+mod kinds;
 mod reminders;
 mod render;
 
 pub use input::*;
+pub use kinds::*;
 pub use reminders::*;
 pub use render::*;
 
@@ -55,135 +57,6 @@ const ALERT_TIMEOUT: Duration = Duration::from_secs(25);
 const IDLE_MASCOT_S: u32 = 20;
 const LOW_BATTERY: u8 = 20;
 const STARTUP_GRACE_S: i64 = 300;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Page {
-    Music,
-    Timer,
-    Water,
-    Shelf,
-    Todo,
-    Calendar,
-}
-
-impl Page {
-    pub const ALL: [Page; 6] = [Page::Music, Page::Timer, Page::Water, Page::Shelf, Page::Todo, Page::Calendar];
-    pub fn icon(self) -> char {
-        use gfx::icon;
-        match self {
-            Page::Music => icon::MUSIC,
-            Page::Timer => icon::TIMER,
-            Page::Water => '\u{E81E}',
-            Page::Shelf => icon::FOLDER,
-            Page::Todo => icon::CHECK,
-            Page::Calendar => icon::CALENDAR,
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Page::Music => "Music",
-            Page::Timer => "Focus",
-            Page::Water => "Water",
-            Page::Shelf => "Shelf",
-            Page::Todo => "To-do",
-            Page::Calendar => "Calendar",
-        }
-    }
-    /// Expanded size in DIPs.
-    pub fn size(self, lyrics_view: bool) -> (f32, f32) {
-        match self {
-            Page::Music if lyrics_view => (680.0, 214.0),
-            Page::Music => (580.0, 190.0),
-            Page::Timer => (560.0, 188.0),
-            Page::Water => (600.0, 204.0),
-            Page::Shelf => (620.0, 200.0),
-            Page::Todo => (600.0, 250.0),
-            Page::Calendar => (640.0, 268.0),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Hud {
-    Volume { level: f32, muted: bool },
-    Brightness(u8),
-    Caps(bool),
-    Language { short: String, name: String },
-    Battery { percent: u8, charging: bool },
-    Wifi { connected: bool, name: String },
-    Headphones { name: String, connected: bool },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum AlertKind {
-    Todo(u64),
-    Water,
-    Pomodoro(Phase),
-    LowBattery(u8),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Hit {
-    Body,
-    PageDot(Page),
-    Settings,
-    Prev,
-    PlayPause,
-    Next,
-    Seek,
-    /// Cycles to the next open player.
-    Source,
-    LyricsToggle,
-    Volume,
-    VolumeBar,
-    LyricLine(u64),
-    PomoToggle,
-    PomoReset,
-    PomoSkip,
-    PomoPhase(u8),
-    Drink,
-    WaterUndo,
-    ShelfItem(usize),
-    ShelfSelect,
-    ShelfClear,
-    ShelfRemove,
-    TodoCheck(u64),
-    /// The whole task row, under its controls, so moving between them keeps them visible.
-    TodoRow(u64),
-    TodoTitle(u64),
-    TodoColor(u64),
-    TodoDue(u64),
-    TodoDelete(u64),
-    TodoAdd,
-    TodoField,
-    NewColor,
-    DueChip(u8),
-    DueStep(i8),
-    DueClear,
-    ShowDone,
-    CalPrev,
-    CalNext,
-    CalToday,
-    CalDay(NaiveDate),
-    CalAdd,
-    AlertPrimary,
-    AlertSecondary,
-    AlertClose,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum EditTarget {
-    NewTask,
-    Rename(u64),
-}
-
-#[derive(Clone, Debug)]
-pub struct TextField {
-    pub target: EditTarget,
-    pub text: String,
-    pub caret: usize,
-}
-
 pub struct Notch {
     pub hwnd: HWND,
     surface: Surface,
@@ -234,6 +107,10 @@ pub struct Notch {
     pub eq_phase: f32,
     pub hidden: bool,
     pub notice: Option<(String, Instant)>,
+    /// Shelf page tab: 0 the shelf, 1 the clipboard history.
+    pub shelf_tab: u8,
+    /// Monitor of the active window, while the notch follows it.
+    pub follow: Option<String>,
     last_frame: Instant,
     pub win: (f32, f32),
 }
@@ -329,6 +206,8 @@ impl Notch {
             eq_phase: 0.0,
             hidden: false,
             notice: None,
+            shelf_tab: 0,
+            follow: None,
             last_frame: Instant::now(),
             win: (0.0, 0.0),
         })
@@ -345,7 +224,7 @@ impl Notch {
     }
 
     pub fn pages(cfg: &Config) -> Vec<Page> {
-        Page::ALL.iter().copied().filter(|p| *p != Page::Calendar || cfg.calendar_page).collect()
+        Page::ALL.iter().copied().filter(|p| (*p != Page::Calendar || cfg.calendar_page) && (*p != Page::Stats || cfg.stats_page)).collect()
     }
 
     /// The first MORPH_SPRINGS change the notch outline or slide pages; the rest are small fades.
@@ -371,7 +250,7 @@ impl Notch {
 // ------------------------------------------------------------------ geometry
 
 fn has_activity(app: &App) -> bool {
-    app.media.as_ref().is_some_and(|m| m.info.playing) || app.pomo.is_running()
+    app.media.as_ref().is_some_and(|m| m.info.playing) || app.focus_running()
 }
 
 /// Target outline (w, h, bottom radius) for the current state.
@@ -393,8 +272,9 @@ fn target_shape(app: &App) -> (f32, f32, f32) {
     } else if app.cfg.minimal && !has_activity(app) {
         (170.0, 5.0, 2.5)
     } else if app.media.is_some() {
-        (300.0, 32.0, 13.0)
-    } else if app.pomo.is_running() {
+        // Wide enough for the artwork, the song title and the equalizer.
+        (360.0, 32.0, 13.0)
+    } else if app.focus_running() {
         (250.0, 32.0, 13.0)
     } else {
         (196.0, 32.0, 13.0)
@@ -491,7 +371,7 @@ pub fn show_alert(app: &mut App, kind: AlertKind) {
     app.notch.hud = None;
     app.notch.alert = Some((kind, Instant::now()));
     app.notch.h.kick(140.0);
-    if app.cfg.sounds {
+    if app.cfg.sounds && !(app.cfg.respect_quiet && crate::quiet::active()) {
         sound::play(match kind {
             AlertKind::Water => Chime::Drop,
             AlertKind::Pomodoro(Phase::Focus) => Chime::Bell,
@@ -500,6 +380,14 @@ pub fn show_alert(app: &mut App, kind: AlertKind) {
         });
     }
     request_frame(app);
+}
+
+/// Sui celebrates a finished session or goal, when reactions are on.
+pub fn cheer(app: &mut App) {
+    if app.cfg.mascot && app.cfg.sui_reactions {
+        app.notch.mascot.cheer();
+        request_frame(app);
+    }
 }
 
 pub fn notice(app: &mut App, text: &str) {
@@ -514,11 +402,22 @@ pub fn config_changed(app: &mut App, old: &Config) {
     }
     app.notch.radius.tune(r, z.max(0.9));
     app.notch.open.tune(r * 0.9, 1.0);
-    if old.display != app.cfg.display || old.size != app.cfg.size {
+    if old.display != app.cfg.display || old.size != app.cfg.size || old.display_follow != app.cfg.display_follow {
         relocate(app);
     }
     if !app.cfg.calendar_page && app.notch.page == Page::Calendar {
         app.notch.page = Page::Todo;
+    }
+    if !app.cfg.stats_page && app.notch.page == Page::Stats {
+        app.notch.page = Page::Todo;
+    }
+    if old.clipboard_limit != app.cfg.clipboard_limit {
+        app.clips.set_limit(app.cfg.clipboard_limit);
+    }
+    if old.clipboard_history && !app.cfg.clipboard_history {
+        // Turning history off also forgets what was kept.
+        app.clips.clear();
+        app.notch.shelf_tab = 0;
     }
     check_fullscreen(app);
     schedule(app);
@@ -526,12 +425,26 @@ pub fn config_changed(app: &mut App, old: &Config) {
 }
 
 pub fn relocate(app: &mut App) {
-    if let Some(m) = sys::pick_monitor(crate::profile::display_override().or(app.cfg.display.clone()).as_deref()) {
+    let follow = if app.cfg.display_follow { app.notch.follow.clone() } else { None };
+    if let Some(m) = sys::pick_monitor(crate::profile::display_override().or(follow).or(app.cfg.display.clone()).as_deref()) {
         app.notch.scale = monitor_scale(&app.cfg, &m);
         crate::ticker::set_monitor(&m.device);
         app.notch.monitor = m;
     }
     request_frame(app);
+}
+
+/// With "Follow the active window", moves the notch to the monitor the user is working on.
+fn follow_foreground(app: &mut App) {
+    if !app.cfg.display_follow {
+        return;
+    }
+    if let Some(device) = sys::foreground_monitor() {
+        if device != app.notch.monitor.device {
+            app.notch.follow = Some(device);
+            relocate(app);
+        }
+    }
 }
 
 pub fn check_fullscreen(app: &mut App) {
@@ -630,6 +543,11 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
             relocate(app);
+            accent_changed(app);
+            None
+        }
+        WM_DWMCOLORIZATIONCOLORCHANGED => {
+            accent_changed(app);
             None
         }
         events::WM_APP_FRAME => {
@@ -656,6 +574,7 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             Some(LRESULT(0))
         }
         events::WM_APP_FOREGROUND => {
+            follow_foreground(app);
             check_fullscreen(app);
             Some(LRESULT(0))
         }
@@ -667,11 +586,31 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             crate::tray::on_message(app, lparam);
             Some(LRESULT(0))
         }
+        WM_CLIPBOARDUPDATE => {
+            if app.cfg.clipboard_history && crate::clips::capture(&mut app.clips, app.notch.hwnd) {
+                if app.cfg.hud_clipboard {
+                    if let Some((image, preview)) = app.clips.items.first().map(crate::clips::summary) {
+                        show_hud(app, Hud::Clipboard { image, preview });
+                    }
+                }
+                request_frame(app);
+            }
+            Some(LRESULT(0))
+        }
         WM_COMMAND => {
             crate::tray::on_command(app, (wparam.0 & 0xffff) as u16);
             Some(LRESULT(0))
         }
         _ => None,
+    }
+}
+
+/// Windows' accent colour may have changed; repaint everything that follows it.
+fn accent_changed(app: &mut App) {
+    if sys::refresh_system_accent() && app.cfg.accent_follow_system {
+        crate::tray::refresh_icon(app);
+        crate::settings::refresh(app);
+        request_frame(app);
     }
 }
 
@@ -704,6 +643,7 @@ pub fn start(app: &mut App) {
     events::set_target(app.notch.hwnd);
     crate::ticker::start(&app.notch.monitor.device);
     sys::register_power(app.notch.hwnd);
+    crate::clips::start(app.notch.hwnd);
     app.caps = sys::caps_lock_on();
     app.language = sys::keyboard_language();
     app.network = Some(sys::network_state());

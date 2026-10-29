@@ -54,6 +54,9 @@ pub mod icon {
     pub const UNDO: char = '\u{E7A7}';
     pub const POWER: char = '\u{E7E8}';
     pub const SWITCH: char = '\u{E8AB}';
+    pub const CHART: char = '\u{E9D2}';
+    pub const CLIPBOARD: char = '\u{E77F}';
+    pub const IMAGE: char = '\u{EB9F}';
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]

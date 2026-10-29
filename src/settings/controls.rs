@@ -11,10 +11,14 @@ pub(super) struct Ui<'a, 'b> {
     pub(super) row_index: usize,
     pub(super) moving: bool,
     pub(super) dt: f32,
+    /// Corner roundness from Appearance, applied to cards and controls.
+    pub(super) round: f32,
 }
 
 pub(super) const ROW: f32 = 48.0;
 pub(super) const ROW_SUB: f32 = 56.0;
+/// A row with a label above a button group, with room between them.
+pub(super) const ROW_SEG: f32 = 96.0;
 /// Line height of release notes on the "What's new" page.
 pub(super) const NOTE_LINE: f32 = 19.0;
 
@@ -37,7 +41,7 @@ impl Ui<'_, '_> {
     pub(super) fn card(&mut self, heights: &[f32]) -> Vec<R> {
         let total: f32 = heights.iter().sum();
         let r = R::new(self.x, self.y, self.w, total);
-        self.cv.fill_rrect(r, 12.0, CARD);
+        self.cv.fill_rrect(r, 12.0 * self.round, CARD);
         let mut rows = Vec::new();
         let mut y = self.y;
         for (i, h) in heights.iter().enumerate() {
@@ -87,15 +91,15 @@ impl Ui<'_, '_> {
         self.moving |= spring.step(self.dt);
         let pos = spring.value;
         let bar = R::new(r.x, r.y, r.w, 30.0);
-        self.cv.fill_rrect(bar, 8.0, C::WHITE.a(0.06));
+        self.cv.fill_rrect(bar, 8.0 * self.round, C::WHITE.a(0.06));
         let seg_w = bar.w / labels.len() as f32;
-        self.cv.fill_rrect(R::new(bar.x + 2.0 + pos * seg_w, bar.y + 2.0, seg_w - 4.0, bar.h - 4.0), 6.5, C::WHITE.a(0.16));
+        self.cv.fill_rrect(R::new(bar.x + 2.0 + pos * seg_w, bar.y + 2.0, seg_w - 4.0, bar.h - 4.0), 6.5 * self.round, C::WHITE.a(0.16));
         for (i, l) in labels.iter().enumerate() {
             let sr = R::new(bar.x + i as f32 * seg_w, bar.y, seg_w, bar.h);
             let act = Act::Seg(f, i);
             self.s.hits.push((sr, act));
             if hovered(self.s, act) && i != sel {
-                self.cv.fill_rrect(sr.inset(2.0, 2.0), 6.5, C::WHITE.a(0.05));
+                self.cv.fill_rrect(sr.inset(2.0, 2.0), 6.5 * self.round, C::WHITE.a(0.05));
             }
             self.cv.text(l, sr, 12.0, if i == sel { 650 } else { 500 }, if i == sel { C::WHITE } else { DIM }, Align::Center);
         }

@@ -17,7 +17,7 @@ impl Ui<'_, '_> {
             2 => self.appearance(&cfg),
             3 => self.music(&cfg),
             4 => self.todo(&cfg),
-            5 => self.calendar(&cfg),
+            5 => self.calendar(&cfg, app),
             6 => self.pomodoro(&cfg),
             7 => self.water(&cfg),
             8 => self.shelf(&cfg, app.shelf.items.len()),
@@ -37,13 +37,16 @@ impl Ui<'_, '_> {
         let r = self.card(&[ROW]);
         self.toggle(c, r[0], "Start with Windows", None, |c| &mut c.start_with_windows);
         self.section("Notch");
-        let r = self.card(&[86.0, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.seg_row(c, r[0], "Size", Some("Applies right away. Auto is larger on wide monitors"), &config::SIZE_LABELS, |c| &mut c.size);
         self.toggle(c, r[1], "Minimal notch", Some("A thin line when nothing is playing"), |c| &mut c.minimal);
         self.toggle(c, r[2], "Sui mascot", Some("A little droplet that lives in the notch"), |c| &mut c.mascot);
-        self.section("Sounds");
-        let r = self.card(&[ROW_SUB]);
+        self.toggle(c, r[3], "Sui reactions", Some("Sui cheers for finished focus sessions, goals and tasks, and naps on long breaks"), |c| &mut c.sui_reactions);
+        self.toggle(c, r[4], "Stats page", Some("This week's focus time, water and tasks, with streaks"), |c| &mut c.stats_page);
+        self.section("Sounds and quiet");
+        let r = self.card(&[ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Reminder sounds", Some("Chimes for Pomodoro, To-do and Water"), |c| &mut c.sounds);
+        self.toggle(c, r[1], "Respect Do Not Disturb", Some("Hold reminders while Windows is in Do Not Disturb, presenting or gaming"), |c| &mut c.respect_quiet);
         self.section("Full screen");
         let r = self.card(&[ROW_SUB]);
         self.toggle(c, r[0], "Hide in full screen", Some("Games, videos and slides that fill the screen"), |c| &mut c.hide_fullscreen);
@@ -53,20 +56,22 @@ impl Ui<'_, '_> {
         self.title("Display");
         self.section("Show the notch on");
         let monitors = self.s.monitors.clone();
-        let mut heights = vec![ROW];
+        let mut heights = vec![ROW, ROW_SUB];
         heights.extend(std::iter::repeat_n(ROW, monitors.len()));
         let rows = self.card(&heights);
         let accent = Self::accent(c);
-        let auto = c.display.is_none() || !monitors.iter().any(|m| Some(&m.device) == c.display.as_ref());
+        let follow = c.display_follow;
+        let auto = !follow && (c.display.is_none() || !monitors.iter().any(|m| Some(&m.device) == c.display.as_ref()));
         self.radio(rows[0], "Main display", Some("Follows the primary monitor"), auto, Act::Display(None), accent);
+        self.radio(rows[1], "Follow the active window", Some("The notch moves to the screen you're working on"), follow, Act::DisplayFollow, accent);
         for (i, m) in monitors.iter().enumerate() {
             let size = format!("{} x {}", m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
             let name = format!("Display {}{}", i + 1, if m.primary { " (primary)" } else { "" });
-            let selected = !auto && c.display.as_deref() == Some(m.device.as_str());
-            self.radio_with_meta(rows[i + 1], &name, &size, selected, Act::Display(Some(i)), accent);
+            let selected = !auto && !follow && c.display.as_deref() == Some(m.device.as_str());
+            self.radio_with_meta(rows[i + 2], &name, &size, selected, Act::Display(Some(i)), accent);
         }
         self.section("Behaviour");
-        let r = self.card(&[ROW_SUB, 86.0]);
+        let r = self.card(&[ROW_SUB, ROW_SEG]);
         self.toggle(c, r[0], "Open on hover", Some("Otherwise click the notch to open it"), |c| &mut c.expand_on_hover);
         self.seg_row(c, r[1], "Hover delay", Some("How long to rest on the notch before it opens"), &config::HOVER_DELAY_LABELS, |c| &mut c.hover_delay);
     }
@@ -74,7 +79,7 @@ impl Ui<'_, '_> {
     fn radio(&mut self, r: R, label: &str, sub: Option<&str>, on: bool, act: Act, accent: C) {
         self.s.hits.push((r, act));
         if hovered(self.s, act) {
-            self.cv.fill_rrect(r.inset(4.0, 3.0), 9.0, C::WHITE.a(0.03));
+            self.cv.fill_rrect(r.inset(4.0, 3.0), 9.0 * self.round, C::WHITE.a(0.03));
         }
         self.label(r, label, sub);
         let (cx, cy) = (r.right() - 30.0, r.cy());
@@ -94,29 +99,36 @@ impl Ui<'_, '_> {
     fn appearance(&mut self, c: &Config) {
         self.title("Appearance");
         self.section("Accent colour");
-        let r = self.card(&[64.0]);
+        let r = self.card(&[64.0, ROW_SUB]);
         let row = r[0];
+        let follow = c.accent_follow_system;
         for (i, rgb) in ACCENTS.iter().enumerate() {
             let cx = row.x + 32.0 + i as f32 * 46.0;
             let act = Act::Accent(i);
             self.s.hits.push((R::centered(cx, row.cy(), 40.0, 40.0), act));
-            let col = C::hex(*rgb);
+            // While Windows picks the colour, our swatches stay available but step back.
+            let col = C::hex(*rgb).a(if follow { 0.4 } else { 1.0 });
             let grow = if hovered(self.s, act) { 1.5 } else { 0.0 };
             self.cv.fill_circle(cx, row.cy(), 13.0 + grow, col);
-            if c.accent == i {
+            if c.accent == i && !follow {
                 self.cv.stroke_circle(cx, row.cy(), 18.0, col, 2.0);
             }
         }
+        let sub = match sys::system_accent() {
+            Some(_) => "Matches the colour in Windows Settings > Personalization > Colors",
+            None => "Windows' accent colour couldn't be read, so your pick above is used",
+        };
+        self.toggle(c, r[1], "Use the Windows accent colour", Some(sub), |c| &mut c.accent_follow_system);
         self.section("Shape");
-        let r = self.card(&[86.0, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB]);
         self.seg_row(c, r[0], "Corner roundness", Some("How soft the bottom corners of the notch are"), &config::ROUNDNESS_LABELS, |c| &mut c.roundness);
         self.toggle(c, r[1], "Frosted glass", Some("A slightly translucent notch with a fine edge"), |c| &mut c.glass);
         self.toggle(c, r[2], "Shadow", Some("A soft shadow under the open notch"), |c| &mut c.shadow);
         self.section("Motion");
-        let r = self.card(&[86.0]);
+        let r = self.card(&[ROW_SEG]);
         self.seg_row(c, r[0], "Animation style", Some("Spring feel for opening, closing and switching pages"), &config::ANIMATION_LABELS, |c| &mut c.animation);
         self.section("Clock");
-        let r = self.card(&[86.0]);
+        let r = self.card(&[ROW_SEG]);
         self.seg_row(c, r[0], "Time format", Some("System follows your Windows region settings"), &config::CLOCK_LABELS, |c| &mut c.clock_format);
     }
 
@@ -139,7 +151,7 @@ impl Ui<'_, '_> {
     fn todo(&mut self, c: &Config) {
         self.title("To-do");
         self.section("Reminders");
-        let r = self.card(&[86.0]);
+        let r = self.card(&[ROW_SEG]);
         self.seg_row(c, r[0], "Snooze for", Some("When a \"Time's up!\" reminder is snoozed"), &config::SNOOZE_LABELS, |c| &mut c.todo_snooze);
         self.section("List");
         let r = self.card(&[ROW_SUB, ROW_SUB]);
@@ -147,25 +159,50 @@ impl Ui<'_, '_> {
         self.toggle(c, r[1], "Clear completed tasks daily", Some("Finished tasks disappear the next morning"), |c| &mut c.todo_clear_done_daily);
     }
 
-    fn calendar(&mut self, c: &Config) {
+    fn calendar(&mut self, c: &Config, app: &App) {
         self.title("Calendar");
         self.section("Calendar page");
-        let r = self.card(&[ROW_SUB, 86.0, ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SEG, ROW_SUB]);
         self.toggle(c, r[0], "Show the Calendar page", Some("A month view of your tasks in the notch"), |c| &mut c.calendar_page);
         let mut idx = if c.week_starts_monday { 0usize } else { 1 };
         let _ = &mut idx;
         self.label(R::new(r[1].x, r[1].y, r[1].w, 38.0).offset(0.0, 4.0), "Week starts on", None);
         let bar = R::new(r[1].x + 16.0, r[1].bottom() - 42.0, r[1].w - 32.0, 30.0);
         self.week_seg(c, bar);
-        self.toggle(c, r[2], "Task dots", Some("Mark days that have tasks"), |c| &mut c.calendar_dots);
+        self.toggle(c, r[2], "Day dots", Some("Mark days that have tasks or events"), |c| &mut c.calendar_dots);
+        self.calendar_link(c, app);
+    }
+
+    /// The calendar link: paste one, then see its status, refresh it or remove it.
+    fn calendar_link(&mut self, c: &Config, app: &App) {
+        self.section("Events from your calendar");
+        if c.calendar_url.is_empty() {
+            let r = self.card(&[ROW_SUB, ROW_SUB]);
+            let sub = if app.calendar_error.is_empty() { "Copy your calendar's iCal address, then press Paste link" } else { app.calendar_error.as_str() };
+            self.button(r[0], "Add a calendar link", Some(sub), "Paste link", Act::PasteCalendar, false);
+            self.label(r[1], "Where to find it", Some("Outlook: Publish a calendar, ICS link.  Google: Secret address in iCal format"));
+            return;
+        }
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        let status = if !app.calendar_error.is_empty() {
+            app.calendar_error.clone()
+        } else {
+            match app.calendar_synced {
+                Some(t) => format!("{} events  ·  updated {}", app.calendar.len(), sys::format_time(&crate::store::local(t), c.clock_format)),
+                None => "Loading events…".to_string(),
+            }
+        };
+        self.button(r[0], &crate::feed::host(&c.calendar_url), Some(&status), "Refresh", Act::RefreshCalendar, false);
+        self.toggle(c, r[1], "Heads-up before events", Some("A reminder in the notch 10 minutes before each event"), |c| &mut c.calendar_reminders);
+        self.button(r[2], "Remove this calendar", Some("Its events leave SuiNotch; the calendar itself isn't touched"), "Remove", Act::RemoveCalendar, true);
     }
 
     fn week_seg(&mut self, c: &Config, bar: R) {
         let monday = c.week_starts_monday;
-        self.cv.fill_rrect(bar, 8.0, C::WHITE.a(0.06));
+        self.cv.fill_rrect(bar, 8.0 * self.round, C::WHITE.a(0.06));
         let half = bar.w / 2.0;
         let sel = if monday { 0 } else { 1 };
-        self.cv.fill_rrect(R::new(bar.x + 2.0 + sel as f32 * half, bar.y + 2.0, half - 4.0, bar.h - 4.0), 6.5, C::WHITE.a(0.16));
+        self.cv.fill_rrect(R::new(bar.x + 2.0 + sel as f32 * half, bar.y + 2.0, half - 4.0, bar.h - 4.0), 6.5 * self.round, C::WHITE.a(0.16));
         for (i, l) in ["Monday", "Sunday"].iter().enumerate() {
             let sr = R::new(bar.x + i as f32 * half, bar.y, half, bar.h);
             if i != sel {
@@ -215,6 +252,12 @@ impl Ui<'_, '_> {
         self.toggle(c, r[0], "Open the shelf when dragging", Some("The notch opens as files move over it"), |c| &mut c.shelf_open_on_drag);
         self.toggle(c, r[1], "Remove after dragging out", Some("Otherwise items stay until you remove them"), |c| &mut c.shelf_remove_after_drag);
         self.toggle(c, r[2], "Show file sizes", None, |c| &mut c.shelf_show_sizes);
+        self.section("Clipboard history");
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        self.toggle(c, r[0], "Keep clipboard history", Some("Texts and images you copy, until SuiNotch closes"), |c| &mut c.clipboard_history);
+        let (lo, hi) = (crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
+        self.stepper(c, r[1], "Items to keep", Some("Older copies drop off as new ones arrive"), |c| &mut c.clipboard_limit, 5, lo, hi, &|v| format!("{v} items"));
+        self.button(r[2], "Clear clipboard history", Some("Password managers' copies are never kept"), "Clear", Act::ClearClips, true);
         self.section("Items");
         let r = self.card(&[ROW_SUB]);
         let sub = format!("{count} item{} on the shelf. Files themselves are not touched", if count == 1 { "" } else { "s" });
@@ -224,7 +267,7 @@ impl Ui<'_, '_> {
     fn hud(&mut self, c: &Config) {
         self.title("HUD and popups");
         self.section("Show an overlay for");
-        let r = self.card(&[ROW, ROW, ROW, ROW, ROW, ROW, ROW]);
+        let r = self.card(&[ROW, ROW, ROW, ROW, ROW, ROW, ROW, ROW_SUB]);
         self.toggle(c, r[0], "Volume", None, |c| &mut c.hud_volume);
         self.toggle(c, r[1], "Brightness", None, |c| &mut c.hud_brightness);
         self.toggle(c, r[2], "Caps Lock", None, |c| &mut c.hud_caps);
@@ -232,8 +275,9 @@ impl Ui<'_, '_> {
         self.toggle(c, r[4], "Battery and charger", None, |c| &mut c.hud_battery);
         self.toggle(c, r[5], "Wi-Fi", None, |c| &mut c.hud_wifi);
         self.toggle(c, r[6], "Headphones", None, |c| &mut c.hud_headphones);
+        self.toggle(c, r[7], "Copied to clipboard", Some("Text and images, while clipboard history is on"), |c| &mut c.hud_clipboard);
         self.section("Style");
-        let r = self.card(&[86.0, 86.0]);
+        let r = self.card(&[ROW_SEG, ROW_SEG]);
         self.seg_row(c, r[0], "Layout", Some("Compact fits the notch, Wide adds a label"), &config::HUD_STYLE_LABELS, |c| &mut c.hud_style);
         self.seg_row(c, r[1], "Stays for", Some("How long an overlay is shown"), &config::HUD_DURATION_LABELS, |c| &mut c.hud_duration);
     }
@@ -299,12 +343,13 @@ impl Ui<'_, '_> {
         self.cv.text(&format!("Version {}  ·  by {DEVELOPER}", env!("CARGO_PKG_VERSION")), R::new(row.x + 130.0, row.y + 70.0, 300.0, 18.0), 12.5, 500, DIM, Align::Left);
         self.cv.text("A living notch for Windows.", R::new(row.x + 130.0, row.y + 92.0, row.w - 150.0, 18.0), 12.5, 500, DIM, Align::Left);
         self.section("Developer");
-        let r = self.card(&[ROW, ROW_SUB]);
+        let r = self.card(&[ROW, ROW_SUB, ROW_SUB]);
         self.label(r[0], "Made by", None);
         self.cv.text(DEVELOPER, R::new(r[0].right() - 216.0, r[0].y, 200.0, r[0].h), 13.0, 600, C::WHITE, Align::Right);
         self.button(r[1], "Support", Some(SUPPORT_EMAIL), "Email us", Act::Support, false);
+        self.button(r[2], "Support the developers", Some("SuiNotch is free. A coffee helps keep it growing"), "Buy us a coffee", Act::Coffee, false);
         self.section("Updates");
-        let r = self.card(&[ROW_SUB, ROW_SUB, 86.0]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SEG]);
         let current = env!("CARGO_PKG_VERSION");
         self.button(r[1], "What's new", Some(&format!("Changes in version {current}")), "View changelog", Act::Link(CHANGELOG_PAGE), false);
         let (label, sub, button) = match update {

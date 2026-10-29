@@ -34,7 +34,13 @@ struct Track {
 static TRACK: Mutex<Option<Track>> = Mutex::new(None);
 static LAST_POSTED: Mutex<Option<(MediaInfo, std::time::Instant)>> = Mutex::new(None);
 /// Player chosen with the source toggle; None follows the session Windows considers current.
-static PINNED: Mutex<Option<SourceKey>> = Mutex::new(None);
+static PINNED: Mutex<Option<(SourceKey, std::time::Instant)>> = Mutex::new(None);
+/// Player remembered from the last pick; chosen again whenever its session (re)appears.
+static PREFERRED: Mutex<String> = Mutex::new(String::new());
+/// Players open at the last check, to notice the remembered one coming back.
+static KNOWN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// A fresh pick survives Windows switching its current session for this long.
+const PIN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A player's AppUserModelID plus which of its sessions this is, since one browser can hold several.
 type SourceKey = (String, usize);
@@ -48,7 +54,8 @@ pub enum Command {
     NextSource,
 }
 
-pub fn start() {
+pub fn start(preferred: String) {
+    *PREFERRED.lock().unwrap_or_else(|e| e.into_inner()) = preferred;
     std::thread::spawn(|| {
         if let Err(e) = run() {
             crate::log(&format!("media controls unavailable: {e}"));
@@ -60,15 +67,21 @@ fn run() -> Result<()> {
     let manager = Manager::RequestAsync()?.get()?;
     manager.CurrentSessionChanged(&TypedEventHandler::new(|_, _| {
         // Something else started playing: follow it rather than an earlier pick.
-        *PINNED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner());
+        if pinned.as_ref().is_some_and(|(_, at)| at.elapsed() > PIN_GRACE) {
+            *pinned = None;
+        }
+        drop(pinned);
         resubscribe();
         Ok(())
     }))?;
     manager.SessionsChanged(&TypedEventHandler::new(|_, _| {
+        adopt_preferred();
         resubscribe();
         Ok(())
     }))?;
     let _ = MANAGER.set(manager);
+    adopt_preferred();
     resubscribe();
     Ok(())
 }
@@ -87,7 +100,7 @@ fn source_keys(sessions: &[Session]) -> Vec<SourceKey> {
 fn active_session() -> Option<Session> {
     let manager = MANAGER.get()?;
     let mut pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(key) = pinned.clone() {
+    if let Some((key, _)) = pinned.clone() {
         let all = sessions();
         match source_keys(&all).iter().position(|k| *k == key) {
             Some(i) => return all.into_iter().nth(i),
@@ -110,7 +123,7 @@ fn next_source(keys: &[SourceKey], current: Option<&SourceKey>) -> Option<Source
 fn cycle_source() {
     let all = sessions();
     let keys = source_keys(&all);
-    let pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner()).clone().map(|(k, _)| k);
     let current = pinned.or_else(|| {
         // Windows may hand back a new object for the same session, so fall back to its player id.
         let s = active_session()?;
@@ -124,11 +137,30 @@ fn cycle_source() {
         let Some(next) = next_source(&keys, candidate.as_ref()) else { return };
         let i = keys.iter().position(|k| *k == next).unwrap_or(0);
         if has_track(&all[i]) {
-            *PINNED.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
+            *PREFERRED.lock().unwrap_or_else(|e| e.into_inner()) = next.0.clone();
+            post(Event::PlayerPicked(next.0.clone()));
+            pin(next);
             resubscribe();
             return;
         }
         candidate = Some(next);
+    }
+}
+
+fn pin(key: SourceKey) {
+    *PINNED.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, std::time::Instant::now()));
+}
+
+/// Picks the remembered player when its session appears: at startup, or when the app reopens.
+fn adopt_preferred() {
+    let ids: Vec<String> = source_keys(&sessions()).into_iter().map(|k| k.0).collect();
+    let preferred = PREFERRED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let appeared = !preferred.is_empty() && ids.contains(&preferred) && !known.contains(&preferred);
+    *known = ids;
+    drop(known);
+    if appeared {
+        pin((preferred, 0));
     }
 }
 

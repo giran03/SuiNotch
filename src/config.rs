@@ -27,12 +27,21 @@ pub struct Config {
     pub mascot: bool,
     pub sounds: bool,
     pub hide_fullscreen: bool,
+    /// Hold reminders while Windows is in Do Not Disturb, presenting or running a full-screen game.
+    pub respect_quiet: bool,
+    /// Sui cheers for finished sessions and goals, and dozes through long breaks.
+    pub sui_reactions: bool,
+    pub stats_page: bool,
     // Display
     pub display: Option<String>,
+    /// Move the notch to whichever monitor holds the active window.
+    pub display_follow: bool,
     pub expand_on_hover: bool,
     pub hover_delay: usize,
     // Appearance
     pub accent: usize,
+    /// Use the accent colour chosen in Windows instead of one of ours.
+    pub accent_follow_system: bool,
     pub roundness: usize,
     pub animation: usize,
     pub shadow: bool,
@@ -44,6 +53,8 @@ pub struct Config {
     pub lyrics_pill: bool,
     pub equalizer: bool,
     pub show_source: bool,
+    /// AppUserModelID of the player last picked with the switch; picked again when it reopens.
+    pub preferred_player: String,
     // To-do
     pub todo_snooze: usize,
     pub todo_show_done: bool,
@@ -52,6 +63,9 @@ pub struct Config {
     pub calendar_page: bool,
     pub week_starts_monday: bool,
     pub calendar_dots: bool,
+    /// Secret iCal address of an Outlook, Google or other calendar; empty for none.
+    pub calendar_url: String,
+    pub calendar_reminders: bool,
     // Pomodoro
     pub focus_min: u32,
     pub short_break_min: u32,
@@ -59,6 +73,9 @@ pub struct Config {
     pub sessions_before_long: u32,
     pub auto_start_breaks: bool,
     pub auto_start_focus: bool,
+    /// Focus tab mode: 0 Pomodoro, 1 timer, 2 stopwatch.
+    pub focus_mode: usize,
+    pub timer_min: u32,
     // Water
     pub water_enabled: bool,
     pub glass_ml: u32,
@@ -70,6 +87,8 @@ pub struct Config {
     pub shelf_open_on_drag: bool,
     pub shelf_remove_after_drag: bool,
     pub shelf_show_sizes: bool,
+    pub clipboard_history: bool,
+    pub clipboard_limit: u32,
     // HUD and popups
     pub hud_volume: bool,
     pub hud_brightness: bool,
@@ -78,6 +97,7 @@ pub struct Config {
     pub hud_battery: bool,
     pub hud_wifi: bool,
     pub hud_headphones: bool,
+    pub hud_clipboard: bool,
     pub hud_duration: usize,
     pub hud_style: usize,
     // About
@@ -95,10 +115,15 @@ impl Default for Config {
             mascot: true,
             sounds: true,
             hide_fullscreen: true,
+            respect_quiet: true,
+            sui_reactions: true,
+            stats_page: true,
             display: None,
+            display_follow: false,
             expand_on_hover: true,
             hover_delay: 1,
             accent: 0,
+            accent_follow_system: false,
             roundness: 1,
             animation: 1,
             shadow: true,
@@ -109,18 +134,23 @@ impl Default for Config {
             lyrics_pill: true,
             equalizer: true,
             show_source: true,
+            preferred_player: String::new(),
             todo_snooze: 1,
             todo_show_done: true,
             todo_clear_done_daily: false,
             calendar_page: true,
             week_starts_monday: true,
             calendar_dots: true,
+            calendar_url: String::new(),
+            calendar_reminders: true,
             focus_min: 25,
             short_break_min: 5,
             long_break_min: 15,
             sessions_before_long: 4,
             auto_start_breaks: false,
             auto_start_focus: false,
+            focus_mode: 0,
+            timer_min: 10,
             water_enabled: true,
             glass_ml: 250,
             goal_ml: 2000,
@@ -130,6 +160,8 @@ impl Default for Config {
             shelf_open_on_drag: true,
             shelf_remove_after_drag: false,
             shelf_show_sizes: true,
+            clipboard_history: true,
+            clipboard_limit: crate::clips::DEFAULT_LIMIT,
             hud_volume: true,
             hud_brightness: true,
             hud_caps: true,
@@ -137,6 +169,7 @@ impl Default for Config {
             hud_battery: true,
             hud_wifi: true,
             hud_headphones: true,
+            hud_clipboard: true,
             hud_duration: 1,
             hud_style: 0,
             update_mode: crate::update::MODE_AUTO,
@@ -164,7 +197,12 @@ impl Config {
         HOVER_DELAYS_MS[self.hover_delay.min(2)]
     }
     pub fn accent_rgb(&self) -> u32 {
-        ACCENTS[self.accent.min(ACCENTS.len() - 1)]
+        let own = ACCENTS[self.accent.min(ACCENTS.len() - 1)];
+        if self.accent_follow_system {
+            crate::sys::system_accent().unwrap_or(own)
+        } else {
+            own
+        }
     }
     pub fn roundness(&self) -> f32 {
         ROUNDNESS[self.roundness.min(2)]
@@ -195,6 +233,9 @@ impl Config {
         self.short_break_min = self.short_break_min.clamp(1, 30);
         self.long_break_min = self.long_break_min.clamp(5, 60);
         self.sessions_before_long = self.sessions_before_long.clamp(2, 8);
+        self.focus_mode = self.focus_mode.min(2);
+        self.timer_min = self.timer_min.clamp(1, crate::timers::MAX_MIN);
+        self.clipboard_limit = self.clipboard_limit.clamp(crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
         self.glass_ml = self.glass_ml.clamp(50, 2000);
         self.goal_ml = self.goal_ml.clamp(500, 6000);
         self.water_start_hour = self.water_start_hour.min(23);

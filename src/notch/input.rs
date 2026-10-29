@@ -67,6 +67,15 @@ pub(super) fn on_mouse_move(app: &mut App, x: f32, y: f32) {
             app::defer(Deferred::DragOut(indices));
         }
     }
+    if let Some((Hit::ClipItem(i), px, py)) = app.notch.pressed {
+        if (x - px).abs() + (y - py).abs() > 6.0 {
+            app.notch.pressed = None;
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            app::defer(Deferred::DragClip(i));
+        }
+    }
     request_frame(app);
 }
 
@@ -149,7 +158,7 @@ pub(super) fn on_wheel(app: &mut App, delta: i16, horizontal: bool) {
         return;
     }
     let steps = delta as f32 / 120.0;
-    let over_list = matches!(app.notch.hover, Some(Hit::ShelfItem(_) | Hit::TodoRow(_) | Hit::TodoTitle(_) | Hit::TodoDelete(_) | Hit::TodoCheck(_) | Hit::TodoDue(_)));
+    let over_list = matches!(app.notch.hover, Some(Hit::ShelfItem(_) | Hit::ClipItem(_) | Hit::TodoRow(_) | Hit::TodoTitle(_) | Hit::TodoDelete(_) | Hit::TodoCheck(_) | Hit::TodoDue(_)));
     if !horizontal && over_list && app.notch.page == Page::Todo && views::todo_overflow(app) > 0.0 {
         let max = views::todo_overflow(app);
         let t = (app.notch.todo_scroll.target - steps * 36.0).clamp(0.0, max);
@@ -201,9 +210,12 @@ pub(super) fn on_key(app: &mut App, vk: VIRTUAL_KEY) {
         VK_ESCAPE => collapse(app),
         VK_SPACE if app.notch.page == Page::Music => crate::media::command(crate::media::Command::PlayPause),
         VK_SPACE if app.notch.page == Page::Timer => {
-            let (now, d) = (app.now_ms(), app.durations());
-            app.pomo.toggle(now, &d);
-            schedule(app);
+            let hit = match app.cfg.focus_mode {
+                1 => Hit::TimerToggle,
+                2 => Hit::WatchToggle,
+                _ => Hit::PomoToggle,
+            };
+            views::click(app, hit, (false, false));
         }
         _ => {}
     }
@@ -244,7 +256,7 @@ pub(super) fn on_char(app: &mut App, ch: u16) {
     request_frame(app);
 }
 
-pub(super) fn clipboard_text() -> Option<String> {
+pub fn clipboard_text() -> Option<String> {
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::*;
     unsafe {

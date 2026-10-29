@@ -1,5 +1,5 @@
 //! Sui, the droplet that lives in the notch. It blinks and glances around while you work,
-//! dozes off when the PC is quiet, and waves when you come back.
+//! dozes off when the PC is quiet, waves when you come back, and cheers for finished goals.
 
 use std::time::{Duration, Instant};
 
@@ -9,12 +9,15 @@ use crate::gfx::{Canvas, C};
 const DOZE_AFTER_S: u32 = 90;
 const WAVE_FOR: Duration = Duration::from_millis(1800);
 const BLINK_FOR: Duration = Duration::from_millis(160);
+const CHEER_FOR: Duration = Duration::from_millis(2600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mood {
     Awake,
     Dozing,
     Waving,
+    /// A short celebration: hops with both arms up.
+    Cheering,
 }
 
 pub struct Mascot {
@@ -59,6 +62,7 @@ impl Mascot {
                 self.squash.kick(6.0);
             }
             Mood::Waving if now - self.mood_since > WAVE_FOR => self.set_mood(Mood::Awake),
+            Mood::Cheering if now - self.mood_since > CHEER_FOR => self.set_mood(Mood::Awake),
             _ => {}
         }
         if self.mood == Mood::Awake {
@@ -83,6 +87,11 @@ impl Mascot {
         }
     }
 
+    pub fn cheer(&mut self) {
+        self.set_mood(Mood::Cheering);
+        self.squash.kick(7.0);
+    }
+
     pub fn poke(&mut self) {
         self.squash.kick(5.0);
         self.blink_at = Instant::now();
@@ -102,12 +111,25 @@ impl Mascot {
 
     /// Draws Sui centered on (cx, cy); `size` is the droplet height.
     pub fn draw(&self, cv: &Canvas, cx: f32, cy: f32, size: f32, body: C) {
-        let t = self.mood_since.elapsed().as_secs_f32();
+        self.draw_mood(cv, self.mood, self.mood_since.elapsed().as_secs_f32(), cx, cy, size, body);
+    }
+
+    /// Sui asleep, whatever the current mood (used beside a long break); `t` drives the z's.
+    pub fn draw_dozing(&self, cv: &Canvas, t: f32, cx: f32, cy: f32, size: f32, body: C) {
+        self.draw_mood(cv, Mood::Dozing, t, cx, cy, size, body);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_mood(&self, cv: &Canvas, mood: Mood, t: f32, cx: f32, cy: f32, size: f32, body: C) {
         let squash = self.squash.value * 0.05;
-        let breathe = if self.mood == Mood::Dozing { (t * 1.6).sin() * 0.035 } else { 0.0 };
+        let breathe = if mood == Mood::Dozing { (t * 1.6).sin() * 0.035 } else { 0.0 };
         let sy = 1.0 - squash + breathe;
         let sx = 1.0 + squash * 0.8 - breathe * 0.5;
-        let bounce = if self.mood == Mood::Waving { -((t * 9.0).sin().abs()) * size * 0.08 * (1.0 - t / 1.8).max(0.0) } else { 0.0 };
+        let bounce = match mood {
+            Mood::Waving => -((t * 9.0).sin().abs()) * size * 0.08 * (1.0 - t / 1.8).max(0.0),
+            Mood::Cheering => -((t * 7.0).sin().abs()) * size * 0.16 * (1.0 - t / 2.6).max(0.0),
+            _ => 0.0,
+        };
         let h = size * sy;
         let w = size * 0.78 * sx;
         let base = cy + size / 2.0 + bounce;
@@ -117,7 +139,7 @@ impl Mascot {
         let gap = w * 0.2;
         let look = self.look.value * w * 0.07;
         let eye = C(0.02, 0.03, 0.05, 1.0);
-        match self.mood {
+        match mood {
             Mood::Dozing => {
                 for dx in [-gap, gap] {
                     let x = cx + dx;
@@ -132,12 +154,31 @@ impl Mascot {
                     cv.text("z", crate::gfx::R::centered(zx, zy, zs * 2.0, zs * 2.0), zs, 700, body.a(1.0 - phase), crate::gfx::Align::Center);
                 }
             }
+            Mood::Cheering => {
+                // Happy closed eyes, both arms up, and a few sparkles around.
+                for dx in [-gap, gap] {
+                    cv.arc(cx + dx, eye_y + size * 0.03, size * 0.07, -1.1, 1.1, eye, size * 0.045);
+                }
+                let swing = (t * 12.0).sin() * size * 0.05;
+                for side in [-1.0f32, 1.0] {
+                    let (sx, sy) = (cx + side * w * 0.42, base - h * 0.32);
+                    let (hx, hy) = (cx + side * (w * 0.7 + swing), base - h * 0.95);
+                    cv.line(sx, sy, hx, hy, body, size * 0.09);
+                    cv.fill_circle(hx, hy, size * 0.085, body);
+                }
+                for i in 0..3 {
+                    let phase = (t * 0.9 + i as f32 / 3.0).fract();
+                    let ang = i as f32 * 2.1 + t;
+                    let (px, py) = (cx + ang.cos() * size * 0.85, base - h * 0.6 + ang.sin() * size * 0.5);
+                    cv.fill_circle(px, py, size * 0.05 * (1.0 - phase), body.a(1.0 - phase));
+                }
+            }
             _ => {
-                let open = if self.blinking() { 0.12 } else if self.mood == Mood::Waving { 1.2 } else { 1.0 };
+                let open = if self.blinking() { 0.12 } else if mood == Mood::Waving { 1.2 } else { 1.0 };
                 for dx in [-gap, gap] {
                     cv.fill_ellipse(cx + dx + look, eye_y, size * 0.055, size * 0.075 * open, eye);
                 }
-                if self.mood == Mood::Waving {
+                if mood == Mood::Waving {
                     let swing = (t * 14.0).sin() * 0.5;
                     let hx = cx + w * 0.62 + swing.sin() * size * 0.08;
                     let hy = base - h * 0.45 - swing.cos().abs() * size * 0.12;
