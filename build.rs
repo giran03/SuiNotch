@@ -24,11 +24,13 @@ fn main() {
 }
 
 /// Bumping the version switches the app to that version's notes; a version without notes
-/// still builds, with a short placeholder.
+/// (no file, or only the title the release script starts it with) still builds, with a
+/// short placeholder.
 fn embed_changelog() {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let source = format!("changelogs/v{version}.md");
-    let text = std::fs::read_to_string(&source).unwrap_or_else(|_| {
+    let written = |t: &String| t.lines().map(str::trim).any(|l| !l.is_empty() && !l.starts_with("# "));
+    let text = std::fs::read_to_string(&source).ok().filter(written).unwrap_or_else(|| {
         println!("cargo:warning=no release notes at {source}");
         format!("# SuiNotch {version}\n\n- No release notes for this version yet.\n")
     });
