@@ -15,7 +15,7 @@ that opens when you need it and gets out of the way when you don't.
 <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-3BA7FF?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows 10 and 11">
 <img src="https://img.shields.io/badge/Price-Free-0A0B0D?style=for-the-badge" alt="Free">
 <img src="https://img.shields.io/badge/Built%20with-Rust-0A0B0D?style=for-the-badge&logo=rust&logoColor=white" alt="Built with Rust">
-<img src="https://img.shields.io/badge/Version-1.0.0-3BA7FF?style=for-the-badge" alt="Version 1.0.0">
+<img src="https://img.shields.io/github/v/release/giran03/SuiNotch?style=for-the-badge&label=Version&color=3BA7FF" alt="Latest version">
 
 <br><br>
 

@@ -42,7 +42,15 @@ pub fn log(msg: &str) {
     }
 }
 
+/// Writes panics to the log before the process ends; release builds abort, so nothing else would.
+fn log_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        log(&format!("panic in {}: {info}", env!("CARGO_PKG_VERSION")));
+    }));
+}
+
 fn main() {
+    log_panics();
     if !sys::single_instance() {
         // Already running: ask that copy to show its settings instead.
         sys::signal_running_instance();
