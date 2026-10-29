@@ -41,12 +41,8 @@ pub mod icon {
     pub const WIFI: char = '\u{E701}';
     pub const WIFI_OFF: char = '\u{EB5E}';
     pub const HEADPHONE: char = '\u{E7F6}';
-    pub const BLUETOOTH: char = '\u{E702}';
     pub const KEYBOARD: char = '\u{E765}';
-    pub const COPY: char = '\u{E8C8}';
     pub const CLOSE: char = '\u{E711}';
-    pub const RESET: char = '\u{E72C}';
-    pub const SKIP: char = '\u{E893}';
     pub const UP: char = '\u{E70E}';
     pub const LEFT: char = '\u{E76B}';
     pub const RIGHT: char = '\u{E76C}';
@@ -54,14 +50,10 @@ pub mod icon {
     pub const COLOR: char = '\u{E790}';
     pub const DISPLAY: char = '\u{E7F4}';
     pub const BELL: char = '\u{EA8F}';
-    pub const TODO: char = '\u{E9D5}';
-    pub const SHELF: char = '\u{E7B8}';
-    pub const SELECT: char = '\u{E8B3}';
     pub const TEXT: char = '\u{E8D2}';
     pub const UNDO: char = '\u{E7A7}';
-    pub const SNOOZE: char = '\u{E823}';
     pub const POWER: char = '\u{E7E8}';
-    pub const SPARKLE: char = '\u{E734}';
+    pub const SWITCH: char = '\u{E8AB}';
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -261,16 +253,8 @@ impl Gfx {
         }
     }
 
-    pub fn decode_image(&self, bytes: &[u8]) -> Option<IWICBitmapSource> {
-        image::decode(&self.wic, bytes)
-    }
-
     pub fn to_pbgra(&self, source: &IWICBitmapSource) -> Option<IWICBitmapSource> {
         image::to_pbgra(&self.wic, source)
-    }
-
-    pub fn fit(&self, source: &IWICBitmapSource, max_px: u32) -> Option<IWICBitmapSource> {
-        image::fit(&self.wic, source, max_px)
     }
 
     /// Wraps pixels prepared off the UI thread (see `decode_art`) as a WIC bitmap; no decoding.
@@ -596,10 +580,6 @@ impl<'a> Canvas<'a> {
         self.push_layer(geo, opacity);
     }
 
-    pub fn push_clip_path(&mut self, path: &ID2D1PathGeometry, opacity: f32) {
-        self.push_layer(path.cast().ok(), opacity);
-    }
-
     pub fn push_opacity(&mut self, opacity: f32) {
         let parent = self.opacity_stack.last().copied().unwrap_or(1.0);
         self.opacity_stack.push(parent * opacity.clamp(0.0, 1.0));
@@ -655,10 +635,6 @@ impl<'a> Canvas<'a> {
         unsafe { self.rt.SetTransform(&Matrix3x2::translation(dx, dy)) }
     }
 
-    pub fn transform(&self, m: Matrix3x2) {
-        unsafe { self.rt.SetTransform(&m) }
-    }
-
     pub fn reset_transform(&self) {
         unsafe { self.rt.SetTransform(&Matrix3x2::identity()) }
     }
@@ -703,16 +679,6 @@ impl PathBuilder {
     }
     pub fn line_to(&mut self, x: f32, y: f32) -> &mut Self {
         unsafe { self.sink.AddLine(Vector2::new(x, y)) };
-        self
-    }
-    pub fn cubic(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) -> &mut Self {
-        unsafe {
-            self.sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                point1: Vector2::new(x1, y1),
-                point2: Vector2::new(x2, y2),
-                point3: Vector2::new(x, y),
-            })
-        };
         self
     }
     pub fn quad(&mut self, x1: f32, y1: f32, x: f32, y: f32) -> &mut Self {

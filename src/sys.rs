@@ -551,20 +551,6 @@ pub fn format_time(dt: &chrono::DateTime<chrono::Local>, clock: usize) -> String
     }
 }
 
-/// Short weekday + date in the user's language, e.g. "Thu 29 Oct".
-pub fn format_date(dt: &chrono::DateTime<chrono::Local>) -> String {
-    let st = systemtime(dt);
-    let mut buf = [0u16; 64];
-    let n = unsafe {
-        GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), Some(&st), w!("ddd d MMM"), Some(&mut buf), PCWSTR::null())
-    };
-    if n > 1 {
-        String::from_utf16_lossy(&buf[..n as usize - 1])
-    } else {
-        dt.format("%a %-d %b").to_string()
-    }
-}
-
 pub fn month_name(year: i32, month: u32) -> String {
     let st = SYSTEMTIME { wYear: year as u16, wMonth: month as u16, wDay: 1, ..Default::default() };
     let mut buf = [0u16; 64];

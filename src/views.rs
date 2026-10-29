@@ -265,9 +265,6 @@ fn draw_hud(cv: &mut Canvas, app: &mut App, body: R, hud: &Hud) {
             cv.text(name, R::new(ix + 20.0, 0.0, body.w - 130.0, body.h), size, 600, C::WHITE, Align::Left);
             cv.text(if *connected { "Connected" } else { "Disconnected" }, right_r, 12.0, 500, DIM, Align::Right);
         }
-        Hud::Note(text) => {
-            cv.text(text, body, size, 600, C::WHITE, Align::Center);
-        }
     }
 }
 
@@ -486,6 +483,7 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             media::command(Command::PlayPause);
         }
         Hit::Next => media::command(Command::Next),
+        Hit::Source => media::command(Command::NextSource),
         Hit::Seek | Hit::VolumeBar => {}
         Hit::LyricsToggle => app.notch.lyrics_view = !app.notch.lyrics_view,
         Hit::Volume => {

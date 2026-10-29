@@ -72,7 +72,8 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     let x0 = art.right() + 18.0;
     cv.display(&info.title, R::new(x0, area.y + 2.0, info_w, 22.0), 16.0, 700, C::WHITE, Align::Left);
     cv.text(&info.artist, R::new(x0, area.y + 25.0, info_w, 18.0), 12.5, 500, DIM, Align::Left);
-    if app.cfg.show_source && !info.app_id.is_empty() {
+    // With several players open, always say which one the controls drive.
+    if (app.cfg.show_source || info.sources > 1) && !info.app_id.is_empty() {
         cv.text(&media::source_name(&info.app_id), R::new(x0, area.y + 43.0, info_w, 16.0), 11.0, 500, C::WHITE.a(0.35), Align::Left);
     }
 
@@ -101,11 +102,22 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     icon_button(cv, app, cx + 44.0, cy, 14.0, icon::NEXT, Hit::Next, C::WHITE);
     let lyr_color = if lyrics_view { tint.mix(C::WHITE, 0.3) } else { DIM };
     icon_button(cv, app, x0 + 10.0, cy, 12.0, icon::LYRICS, Hit::LyricsToggle, lyr_color);
+    if info.sources > 1 {
+        source_toggle(cv, app, x0 + 40.0, cy, info.sources);
+    }
     volume_control(cv, app, x0 + info_w - 10.0, cy);
 
     if lyrics_view {
         lyrics_panel(cv, app, R::new(area.right() - 252.0, area.y - 6.0, 252.0, area.h + 8.0), tint);
     }
+}
+
+/// Switch glyph with a count of open players; a click moves on to the next one.
+fn source_toggle(cv: &Canvas, app: &mut App, cx: f32, cy: f32, sources: usize) {
+    icon_button(cv, app, cx, cy, 12.0, icon::SWITCH, Hit::Source, DIM);
+    let badge = R::centered(cx + 10.0, cy - 8.0, 13.0, 13.0);
+    cv.fill_circle(badge.cx(), badge.cy(), 6.5, C::WHITE.a(0.16));
+    cv.text(&sources.min(9).to_string(), badge, 9.0, 700, C::WHITE.a(0.8), Align::Center);
 }
 
 fn volume_control(cv: &mut Canvas, app: &mut App, x: f32, cy: f32) {

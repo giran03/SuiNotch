@@ -28,6 +28,8 @@ pub struct MediaInfo {
     pub playing: bool,
     pub position_ms: u64,
     pub duration_ms: u64,
+    /// How many players have a media session open; above one, the Music page offers a toggle.
+    pub sources: usize,
 }
 
 impl MediaInfo {

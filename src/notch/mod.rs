@@ -112,7 +112,6 @@ pub enum Hud {
     Battery { percent: u8, charging: bool },
     Wifi { connected: bool, name: String },
     Headphones { name: String, connected: bool },
-    Note(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +131,8 @@ pub enum Hit {
     PlayPause,
     Next,
     Seek,
+    /// Cycles to the next open player.
+    Source,
     LyricsToggle,
     Volume,
     VolumeBar,
@@ -733,10 +734,6 @@ pub fn timer_hook(app: &mut App, id: usize) {
 
 pub fn today() -> NaiveDate {
     Local::now().date_naive()
-}
-
-pub fn hour_now() -> u32 {
-    Local::now().hour()
 }
 
 /// Profiling demo: open and close the notch on a fixed rhythm, then quit.

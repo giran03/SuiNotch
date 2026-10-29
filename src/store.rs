@@ -145,10 +145,6 @@ impl Todos {
         (done, done + open)
     }
 
-    pub fn clear_done(&mut self) {
-        self.items.retain(|t| !t.done);
-    }
-
     pub fn clear_done_before(&mut self, now: i64) {
         let today = day_of(now);
         self.items.retain(|t| !(t.done && t.done_at.is_some_and(|d| day_of(d) < today)));
