@@ -1,0 +1,22 @@
+SuiNotch third-party notices
+===========================
+
+SuiNotch is built with the following open-source components. Their licences
+require these notices to accompany the software.
+
+{{#each overview}}
+- {{name}} ({{count}} {{#if (eq count 1)}}crate{{else}}crates{{/if}})
+{{/each}}
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{name}}
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

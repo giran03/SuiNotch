@@ -1,0 +1,7 @@
+# cargo-about config: `cargo about generate about.hbs -o THIRD-PARTY-NOTICES.txt`
+# regenerates the notices shipped with the installer after dependencies change.
+accepted = ["MIT", "Apache-2.0", "Unlicense", "Unicode-3.0"]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }

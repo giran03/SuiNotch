@@ -154,4 +154,6 @@ after each one.
 
 **SuiNotch** &nbsp;·&nbsp; Free for Windows &nbsp;·&nbsp; Made by CafeTako
 
+<sub><a href="LICENSE">MIT License</a> &nbsp;·&nbsp; <a href="PRIVACY.md">Privacy</a> &nbsp;·&nbsp; <a href="TRADEMARKS.md">Name &amp; logo</a> &nbsp;·&nbsp; <a href="THIRD-PARTY-NOTICES.txt">Third-party notices</a></sub>
+
 </div>
