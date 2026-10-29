@@ -1,0 +1,37 @@
+{
+  "brand": "SuiNotch",
+  "tagline": "A living notch for Windows",
+  "brief": "A free Windows utility by CafeTako that turns the top edge of the screen into a small notch for music, lyrics, focus timers, water, to-dos and files. It should feel calm, light and friendly, never like a dashboard.",
+  "adjectives": ["calm", "light", "friendly", "fluid"],
+  "criteria": "Success: reads at 16 px in the system tray, works in one colour, carries the mascot Sui, and stays distinct from generic 'dynamic island' pills.",
+  "industry": "consumer-app",
+  "nav": ["Features", "Download", "Support"],
+  "brand_color": "#3BA7FF",
+  "tile_color": "#0A0B0D",
+  "greyscale": false,
+  "designer": "CafeTako",
+  "round": 2,
+  "concepts": [
+    {
+      "name": "Sui in the notch",
+      "symbol": "final/symbol.svg",
+      "lockup": "final/lockup-horizontal.svg",
+      "symbol_on_tile": "final/symbol-color.svg",
+      "symbol_on_dark": "final/symbol-color.svg",
+      "lockup_on_dark": "final/lockup-horizontal-reversed.svg",
+      "idea": "The notch itself, with Sui (sui = water) living inside it.",
+      "rationale": [
+        "The pill is the product: the mark is literally the notch at the top of your screen",
+        "Sui gives the app a character that also appears as the idle mascot",
+        "Droplet sides at exactly 60°, one pill radius, a small-size cut without eyes for 16-32 px",
+        "The wordmark's i carries a droplet instead of a dot"
+      ]
+    }
+  ],
+  "recommendation": "Sui in the notch: approved direction. Masters, variants, app icon and ICO are delivered in brand/.",
+  "next_steps": [
+    "Run a trademark search on the name and mark before public release",
+    "Use the small-size cut for every icon at 32 px and below",
+    "Keep Sui Blue for the pill; let user accent colours tint only the app UI"
+  ]
+}
