@@ -297,7 +297,7 @@ impl Ui<'_, '_> {
         crate::tray::draw_mark_at(self.cv, row.x + 24.0, row.y + 30.0, 88.0);
         self.cv.display("SuiNotch", R::new(row.x + 130.0, row.y + 34.0, 300.0, 34.0), 26.0, 700, C::WHITE, Align::Left);
         self.cv.text(&format!("Version {}  ·  by {DEVELOPER}", env!("CARGO_PKG_VERSION")), R::new(row.x + 130.0, row.y + 70.0, 300.0, 18.0), 12.5, 500, DIM, Align::Left);
-        self.cv.text("A living notch for Windows. Every feature included.", R::new(row.x + 130.0, row.y + 92.0, row.w - 150.0, 18.0), 12.5, 500, DIM, Align::Left);
+        self.cv.text("A living notch for Windows.", R::new(row.x + 130.0, row.y + 92.0, row.w - 150.0, 18.0), 12.5, 500, DIM, Align::Left);
         self.section("Developer");
         let r = self.card(&[ROW, ROW_SUB]);
         self.label(r[0], "Made by", None);
