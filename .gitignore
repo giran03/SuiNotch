@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 
+# Local release tooling and built installers (scripts/release.bat)
+/scripts/
+
 # Tool caches
 .ruff_cache/
 __pycache__/
