@@ -499,13 +499,18 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             }
         }
         Hit::PomoToggle => {
-            let n = app.now_ms();
-            app.pomo.toggle(n);
+            let (n, d) = (app.now_ms(), app.durations());
+            app.pomo.toggle(n, &d);
             notch::schedule(app);
         }
         Hit::PomoReset => {
-            let d = app.durations();
-            app.pomo.reset(&d);
+            // On a previewed phase this button reads "Back" and leaves the timer alone.
+            if app.pomo.preview().is_some() {
+                app.pomo.back();
+            } else {
+                let d = app.durations();
+                app.pomo.reset(&d);
+            }
             notch::schedule(app);
         }
         Hit::PomoSkip => {
@@ -730,7 +735,7 @@ fn alert_action(app: &mut App, primary: bool) {
             } else if !primary {
                 if app.pomo.phase != Phase::Focus {
                     let d = app.durations();
-                    app.pomo.select(Phase::Focus, &d);
+                    app.pomo.switch(Phase::Focus, &d);
                 }
             }
         }

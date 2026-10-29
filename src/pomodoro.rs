@@ -33,19 +33,30 @@ pub struct Pomodoro {
     remaining_ms: u64,
     /// Monotonic ms at which the running phase ends.
     ends_at: Option<u64>,
+    /// Another phase picked while this timer is under way: shown, but the timer keeps going.
+    preview: Option<Phase>,
+}
+
+pub fn phase_length(phase: Phase, d: &Durations) -> u64 {
+    match phase {
+        Phase::Focus => d.focus_ms,
+        Phase::ShortBreak => d.short_ms,
+        Phase::LongBreak => d.long_ms,
+    }
 }
 
 impl Pomodoro {
     pub fn new(d: &Durations) -> Self {
-        Pomodoro { phase: Phase::Focus, completed_focus: 0, remaining_ms: d.focus_ms, ends_at: None }
+        Pomodoro { phase: Phase::Focus, completed_focus: 0, remaining_ms: d.focus_ms, ends_at: None, preview: None }
     }
 
     pub fn length(&self, d: &Durations) -> u64 {
-        match self.phase {
-            Phase::Focus => d.focus_ms,
-            Phase::ShortBreak => d.short_ms,
-            Phase::LongBreak => d.long_ms,
-        }
+        phase_length(self.phase, d)
+    }
+
+    /// Phase picked while another timer is under way, if any.
+    pub fn preview(&self) -> Option<Phase> {
+        self.preview
     }
 
     pub fn is_running(&self) -> bool {
@@ -79,8 +90,12 @@ impl Pomodoro {
         }
     }
 
-    pub fn toggle(&mut self, now: u64) {
-        if self.is_running() {
+    /// Start/pause; on a previewed phase, starts that phase in place of the current timer.
+    pub fn toggle(&mut self, now: u64, d: &Durations) {
+        if let Some(phase) = self.preview {
+            self.switch(phase, d);
+            self.start(now);
+        } else if self.is_running() {
             self.pause(now)
         } else {
             self.start(now)
@@ -90,11 +105,29 @@ impl Pomodoro {
     pub fn reset(&mut self, d: &Durations) {
         self.ends_at = None;
         self.remaining_ms = self.length(d);
+        self.preview = None;
     }
 
-    pub fn select(&mut self, phase: Phase, d: &Durations) {
+    /// Makes `phase` the timer's phase, discarding any time already counted.
+    pub fn switch(&mut self, phase: Phase, d: &Durations) {
         self.phase = phase;
         self.reset(d);
+    }
+
+    /// A phase chip was clicked: switch when nothing is under way, otherwise only preview it.
+    pub fn select(&mut self, phase: Phase, d: &Durations) {
+        if phase == self.phase {
+            self.preview = None;
+        } else if self.is_fresh(d) {
+            self.switch(phase, d);
+        } else {
+            self.preview = Some(phase);
+        }
+    }
+
+    /// Leaves a preview and shows the timer that is under way again.
+    pub fn back(&mut self) {
+        self.preview = None;
     }
 
     /// Settings changed: a paused untouched phase picks up the new length.
@@ -174,6 +207,44 @@ mod tests {
         p.advance(100, &D, true);
         assert!(p.is_running());
         assert_eq!(p.remaining(200), 200);
+    }
+
+    #[test]
+    fn selecting_a_phase_while_a_timer_runs_only_previews_it() {
+        let mut p = Pomodoro::new(&D);
+        p.start(0);
+        p.select(Phase::ShortBreak, &D);
+        assert_eq!(p.preview(), Some(Phase::ShortBreak));
+        assert_eq!((p.phase, p.is_running(), p.remaining(500)), (Phase::Focus, true, 1000));
+        p.select(Phase::Focus, &D);
+        assert_eq!(p.preview(), None);
+        assert_eq!(p.remaining(500), 1000);
+    }
+
+    #[test]
+    fn paused_timer_is_kept_and_back_returns_to_it() {
+        let mut p = Pomodoro::new(&D);
+        p.start(0);
+        p.pause(400);
+        p.select(Phase::LongBreak, &D);
+        p.back();
+        assert_eq!((p.phase, p.preview(), p.remaining(9999)), (Phase::Focus, None, 1100));
+    }
+
+    #[test]
+    fn starting_a_previewed_phase_replaces_the_timer() {
+        let mut p = Pomodoro::new(&D);
+        p.start(0);
+        p.select(Phase::LongBreak, &D);
+        p.toggle(100, &D);
+        assert_eq!((p.phase, p.preview(), p.is_running(), p.remaining(100)), (Phase::LongBreak, None, true, 900));
+    }
+
+    #[test]
+    fn untouched_timer_switches_straight_away() {
+        let mut p = Pomodoro::new(&D);
+        p.select(Phase::ShortBreak, &D);
+        assert_eq!((p.phase, p.preview(), p.remaining(0)), (Phase::ShortBreak, None, 300));
     }
 
     #[test]

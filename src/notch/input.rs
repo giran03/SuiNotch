@@ -201,8 +201,8 @@ pub(super) fn on_key(app: &mut App, vk: VIRTUAL_KEY) {
         VK_ESCAPE => collapse(app),
         VK_SPACE if app.notch.page == Page::Music => crate::media::command(crate::media::Command::PlayPause),
         VK_SPACE if app.notch.page == Page::Timer => {
-            let now = app.now_ms();
-            app.pomo.toggle(now);
+            let (now, d) = (app.now_ms(), app.durations());
+            app.pomo.toggle(now, &d);
             schedule(app);
         }
         _ => {}

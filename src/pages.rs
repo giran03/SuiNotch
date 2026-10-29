@@ -14,7 +14,7 @@ use crate::gfx::{icon, Align, Canvas, C, R};
 use crate::mascot;
 use crate::media;
 use crate::notch::{EditTarget, Hit};
-use crate::pomodoro::Phase;
+use crate::pomodoro::{self, Phase};
 use crate::store::{self, ShelfItem, Todo, TODO_COLORS};
 use crate::sys;
 use crate::views::{self, accent, bar, fmt_ms, hit, hovered, icon_button, pill_button, readable_on, DIM, FAINT, SUBTLE};
@@ -180,30 +180,43 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
 pub fn timer(cv: &mut Canvas, app: &mut App, area: R) {
     let d = app.durations();
     let now = app.now_ms();
-    let left = app.pomo.remaining(now);
-    let total = app.pomo.length(&d).max(1);
-    let color = views::phase_color(app, app.pomo.phase);
+    // A phase picked while a timer is under way is previewed at full length; the timer keeps going.
+    let preview = app.pomo.preview();
+    let shown = preview.unwrap_or(app.pomo.phase);
+    let total = pomodoro::phase_length(shown, &d).max(1);
+    let left = if preview.is_some() { total } else { app.pomo.remaining(now) };
+    let color = views::phase_color(app, shown);
     let (cx, cy, radius) = (area.x + 64.0, area.cy() - 2.0, 58.0);
     cv.stroke_circle(cx, cy, radius, C::WHITE.a(0.1), 7.0);
     let frac = 1.0 - left as f32 / total as f32;
     cv.arc(cx, cy, radius, 0.0, frac.max(0.0005) * std::f32::consts::TAU, color, 7.0);
     cv.display(&fmt_ms(left + 999), R::centered(cx, cy - 6.0, 110.0, 34.0), 27.0, 700, C::WHITE, Align::Center);
-    cv.text(app.pomo.phase.label(), R::centered(cx, cy + 20.0, 110.0, 16.0), 11.5, 600, color, Align::Center);
+    cv.text(shown.label(), R::centered(cx, cy + 20.0, 110.0, 16.0), 11.5, 600, color, Align::Center);
 
     let x0 = area.x + 152.0;
     let w = area.right() - x0;
     let labels = ["Focus", "Short break", "Long break"];
     let phases = [Phase::Focus, Phase::ShortBreak, Phase::LongBreak];
     let mut x = x0;
+    // The timer under way (running, or paused partway) keeps a dot on its chip, plus its time when out of view.
+    let under_way = !app.pomo.is_fresh(&d);
     for (i, label) in labels.iter().enumerate() {
-        let cw = app.gfx.text_width(label, 12.0, 600) + 26.0;
+        let on_screen = shown == phases[i];
+        let timing = under_way && app.pomo.phase == phases[i];
+        let text = if timing && !on_screen { format!("{label}  {}", fmt_ms(app.pomo.remaining(now) + 999)) } else { label.to_string() };
+        let dot = if timing { 12.0 } else { 0.0 };
+        let cw = app.gfx.text_width(&text, 12.0, 600) + 26.0 + dot;
         let r = R::new(x, area.y + 4.0, cw, 28.0);
         let h = Hit::PomoPhase(i as u8);
         hit(app, r, h);
-        let active = app.pomo.phase == phases[i];
-        let fill = if active { views::phase_color(app, phases[i]).a(0.24) } else if hovered(app, h) { FAINT } else { C::WHITE.a(0.05) };
+        let phase_color = views::phase_color(app, phases[i]);
+        let fill = if on_screen { phase_color.a(0.24) } else if hovered(app, h) { FAINT } else { C::WHITE.a(0.05) };
         cv.fill_rrect(r, 14.0, fill);
-        cv.text(label, r, 12.0, 600, if active { C::WHITE } else { DIM }, Align::Center);
+        if timing {
+            cv.fill_circle(r.x + 15.0, r.cy(), 3.5, phase_color);
+        }
+        let text_r = R::new(r.x + dot, r.y, r.w - dot, r.h);
+        cv.text(&text, text_r, 12.0, 600, if on_screen || timing { C::WHITE } else { DIM }, Align::Center);
         x += cw + 8.0;
     }
 
@@ -218,6 +231,12 @@ pub fn timer(cv: &mut Canvas, app: &mut App, area: R) {
     }
 
     let by = area.bottom() - 34.0;
+    if preview.is_some() {
+        // Start replaces the timer under way with this phase; Back returns to it untouched.
+        pill_button(cv, app, R::new(x0, by, 112.0, 32.0), "Start", Hit::PomoToggle, true);
+        pill_button(cv, app, R::new(x0 + 120.0, by, 84.0, 32.0), "Back", Hit::PomoReset, false);
+        return;
+    }
     let running = app.pomo.is_running();
     let main = if running { "Pause" } else if app.pomo.is_fresh(&d) { "Start" } else { "Resume" };
     pill_button(cv, app, R::new(x0, by, 112.0, 32.0), main, Hit::PomoToggle, true);
