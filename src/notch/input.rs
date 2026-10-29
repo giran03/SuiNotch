@@ -167,6 +167,10 @@ pub(super) fn on_wheel(app: &mut App, delta: i16, horizontal: bool) {
         let max = views::shelf_overflow(app);
         let t = (app.notch.shelf_scroll.target - steps * 90.0).clamp(0.0, max);
         app.notch.shelf_scroll.set(t);
+    } else if over_list && app.notch.page == Page::Clipboard && views::clip_overflow(app) > 0.0 {
+        let max = views::clip_overflow(app);
+        let t = (app.notch.clip_scroll.target - steps * 90.0).clamp(0.0, max);
+        app.notch.clip_scroll.set(t);
     } else if matches!(app.notch.hover, Some(Hit::Volume | Hit::VolumeBar)) {
         if let Some(a) = app.audio.as_ref() {
             let (v, _) = a.get();

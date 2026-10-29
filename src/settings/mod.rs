@@ -29,9 +29,9 @@ mod pages;
 
 use controls::*;
 
-pub const ABOUT_PAGE: usize = 10;
+pub const ABOUT_PAGE: usize = 11;
 /// "What's new": reached from About, so it has no sidebar entry of its own.
-pub const CHANGELOG_PAGE: usize = 11;
+pub const CHANGELOG_PAGE: usize = 12;
 pub const DEVELOPER: &str = "CafeTako";
 pub const SUPPORT_EMAIL: &str = "support@cafetako.com";
 pub const COFFEE_URL: &str = "https://buymeacoffee.com/cafetako";
@@ -54,7 +54,7 @@ struct Category {
     tile: u32,
 }
 
-const CATEGORIES: [Category; 11] = [
+const CATEGORIES: [Category; 12] = [
     Category { name: "General", glyph: icon::SETTINGS, tile: 0x8E8E93 },
     Category { name: "Display", glyph: icon::DISPLAY, tile: 0x5E5CE6 },
     Category { name: "Appearance", glyph: icon::COLOR, tile: 0x3A3A3C },
@@ -64,6 +64,7 @@ const CATEGORIES: [Category; 11] = [
     Category { name: "Pomodoro", glyph: icon::TIMER, tile: 0xFF7A1A },
     Category { name: "Water", glyph: '\u{0}', tile: 0x0A84FF },
     Category { name: "Shelf", glyph: icon::FOLDER, tile: 0xF5B400 },
+    Category { name: "Clipboard", glyph: icon::CLIPBOARD, tile: 0xBF5AF2 },
     Category { name: "HUD and popups", glyph: icon::BELL, tile: 0x32ADE6 },
     Category { name: "About", glyph: icon::INFO, tile: 0x636366 },
 ];
@@ -84,6 +85,8 @@ enum Act {
     Step(NumField, i32, u32, u32),
     Display(Option<usize>),
     DisplayFollow,
+    /// Show or hide the notch page at this index of `Page::ALL`.
+    PageToggle(usize),
     PasteCalendar,
     RefreshCalendar,
     RemoveCalendar,
@@ -404,6 +407,18 @@ fn act(app: &mut App, a: Act) {
             c.display_follow = false;
         }
         Act::DisplayFollow => c.display_follow = true,
+        Act::PageToggle(i) => {
+            let key = crate::notch::Page::ALL[i % crate::notch::Page::ALL.len()].key().to_string();
+            if c.page_shown(&key) {
+                c.hidden_pages.push(key);
+                // At least one page stays in the notch.
+                if crate::notch::Notch::pages(&c).is_empty() {
+                    return;
+                }
+            } else {
+                c.hidden_pages.retain(|k| *k != key);
+            }
+        }
         Act::PasteCalendar => match crate::notch::clipboard_text().as_deref().and_then(crate::feed::normalize) {
             Some(url) => {
                 c.calendar_url = url.clone();

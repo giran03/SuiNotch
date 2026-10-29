@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::app::{App, Deferred};
 use crate::gfx::{icon, Align, Canvas, C, R};
 use crate::media::{self, Command};
-use crate::notch::{self, EditTarget, Hit, Hud, Notch, Page, TextField};
+use crate::notch::{self, EditTarget, Hit, Hud, Page, TextField};
 use crate::pages;
 use crate::pomodoro::Phase;
 use crate::store;
@@ -102,7 +102,7 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
     if app.cfg.glass {
         cv.stroke_path(&path, C::WHITE.a(0.09), 1.0);
     }
-    let music_visible = open < 0.5 || app.notch.page == Page::Music;
+    let music_visible = open < 0.5 || app.notch.shown_page() == Page::Music;
     if app.cfg.artwork_glow && app.media.is_some() && !raised && music_visible {
         if let Some(col) = app.art_color {
             // A soft halo centred behind the cover, closed or open.
@@ -351,8 +351,8 @@ fn draw_pill(cv: &mut Canvas, app: &mut App, body: R) {
 // ------------------------------------------------------------------ expanded
 
 fn draw_expanded(cv: &mut Canvas, app: &mut App, body: R) {
-    let pages = Notch::pages(&app.cfg);
-    let page = if app.notch.drag_over && !app.notch.expanded { Page::Shelf } else { app.notch.page };
+    let pages = notch::visible_pages(app);
+    let page = app.notch.shown_page();
     draw_page_bar(cv, app, body, &pages, page);
     let pos = app.notch.page_pos.value;
     for (i, p) in pages.iter().enumerate() {
@@ -360,7 +360,11 @@ fn draw_expanded(cv: &mut Canvas, app: &mut App, body: R) {
         if d.abs() >= 1.0 && *p != page {
             continue;
         }
-        let d = if *p == page && app.notch.drag_over && !app.notch.expanded { 0.0 } else { d };
+        // While something is dragged over the notch, only the Shelf's drop zone shows, in place.
+        if app.notch.drag_over && *p != page {
+            continue;
+        }
+        let d = if app.notch.drag_over { 0.0 } else { d };
         let alpha = (1.0 - d.abs() * 1.4).clamp(0.0, 1.0);
         if alpha <= 0.01 {
             continue;
@@ -373,6 +377,7 @@ fn draw_expanded(cv: &mut Canvas, app: &mut App, body: R) {
             Page::Timer => pages::timer(cv, app, area),
             Page::Water => pages::water(cv, app, area),
             Page::Shelf => pages::shelf(cv, app, area),
+            Page::Clipboard => pages::clipboard(cv, app, area),
             Page::Todo => pages::todo(cv, app, area),
             Page::Calendar => pages::calendar(cv, app, area),
             Page::Stats => pages::stats(cv, app, area),
@@ -455,8 +460,13 @@ pub fn todo_overflow(app: &App) -> f32 {
 
 pub fn shelf_overflow(app: &App) -> f32 {
     let (w, _) = Page::Shelf.size(false);
-    let n = if app.notch.shelf_tab == 1 && app.cfg.clipboard_history { app.clips.items.len() } else { app.shelf.items.len() };
-    let total = n as f32 * (pages::TILE_W + 10.0);
+    let total = app.shelf.items.len() as f32 * (pages::TILE_W + 10.0);
+    (total - (w - 48.0)).max(0.0)
+}
+
+pub fn clip_overflow(app: &App) -> f32 {
+    let (w, _) = Page::Clipboard.size(false);
+    let total = app.clips.items.len() as f32 * (pages::TILE_W + 10.0);
     (total - (w - 48.0)).max(0.0)
 }
 
@@ -555,12 +565,6 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             }
         }
         Hit::ShelfItem(i) => shelf_click(app, i, ctrl, shift),
-        Hit::ShelfTab(t) => {
-            app.notch.shelf_tab = t;
-            app.notch.shelf_scroll.snap(0.0);
-            app.notch.shelf_sel.clear();
-            app.notch.shelf_selecting = false;
-        }
         Hit::ClipItem(i) => {
             if let Some(clip) = app.clips.items.get(i).cloned() {
                 if crate::clips::copy_back(app.notch.hwnd, &clip) {
@@ -571,7 +575,7 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::ClipClear => {
             app.clips.clear();
             app.notch.bitmaps.clear();
-            app.notch.shelf_scroll.snap(0.0);
+            app.notch.clip_scroll.snap(0.0);
         }
         Hit::ShelfSelect => {
             app.notch.shelf_selecting = !app.notch.shelf_selecting;

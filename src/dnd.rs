@@ -121,8 +121,6 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 notch::request_frame(app);
                 return;
             }
-            // Drops always land on the shelf, so show it rather than the clipboard tab.
-            app.notch.shelf_tab = 0;
             let added = if !paths.is_empty() {
                 app.shelf.add_paths(&paths) > 0
             } else {

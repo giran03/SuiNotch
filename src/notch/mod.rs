@@ -90,6 +90,7 @@ pub struct Notch {
     pub shelf_selecting: bool,
     pub shelf_anchor: Option<usize>,
     pub shelf_scroll: Spring,
+    pub clip_scroll: Spring,
     pub shelf_clear: Spring,
     pub drag_over: bool,
     pub own_drag: bool,
@@ -107,8 +108,6 @@ pub struct Notch {
     pub eq_phase: f32,
     pub hidden: bool,
     pub notice: Option<(String, Instant)>,
-    /// Shelf page tab: 0 the shelf, 1 the clipboard history.
-    pub shelf_tab: u8,
     /// Monitor of the active window, while the notch follows it.
     pub follow: Option<String>,
     last_frame: Instant,
@@ -166,7 +165,7 @@ impl Notch {
             h: Spring::new(32.0, anim_r, anim_z),
             radius: Spring::new(13.0, anim_r, anim_z.max(0.9)),
             open: Spring::new(0.0, anim_r * 0.9, 1.0),
-            page: Page::Music,
+            page: Notch::pages(cfg).first().copied().unwrap_or(Page::Music),
             page_pos: Spring::new(0.0, 0.42, 0.88),
             pill_w: Spring::new(0.0, 0.42, 0.8),
             pill_alpha: Spring::new(0.0, 0.3, 1.0),
@@ -189,6 +188,7 @@ impl Notch {
             shelf_selecting: false,
             shelf_anchor: None,
             shelf_scroll: Spring::new(0.0, 0.35, 1.0),
+            clip_scroll: Spring::new(0.0, 0.35, 1.0),
             shelf_clear: Spring::new(1.0, 0.35, 1.0),
             drag_over: false,
             own_drag: false,
@@ -206,11 +206,19 @@ impl Notch {
             eq_phase: 0.0,
             hidden: false,
             notice: None,
-            shelf_tab: 0,
             follow: None,
             last_frame: Instant::now(),
             win: (0.0, 0.0),
         })
+    }
+
+    /// The page on screen: the Shelf while something is dragged over the notch, else the chosen one.
+    pub fn shown_page(&self) -> Page {
+        if self.drag_over {
+            Page::Shelf
+        } else {
+            self.page
+        }
     }
 
     pub fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
@@ -224,11 +232,11 @@ impl Notch {
     }
 
     pub fn pages(cfg: &Config) -> Vec<Page> {
-        Page::ALL.iter().copied().filter(|p| (*p != Page::Calendar || cfg.calendar_page) && (*p != Page::Stats || cfg.stats_page)).collect()
+        Page::ALL.iter().copied().filter(|p| cfg.page_shown(p.key()) && (*p != Page::Clipboard || cfg.clipboard_history)).collect()
     }
 
     /// The first MORPH_SPRINGS change the notch outline or slide pages; the rest are small fades.
-    fn springs(&mut self) -> [&mut Spring; 13] {
+    fn springs(&mut self) -> [&mut Spring; 14] {
         [
             &mut self.w,
             &mut self.h,
@@ -240,6 +248,7 @@ impl Notch {
             &mut self.line_fade,
             &mut self.volume_open,
             &mut self.shelf_scroll,
+            &mut self.clip_scroll,
             &mut self.shelf_clear,
             &mut self.todo_scroll,
             &mut self.water_fill,
@@ -266,7 +275,7 @@ fn target_shape(app: &App) -> (f32, f32, f32) {
             (310.0, 36.0, 15.0)
         }
     } else if n.expanded || n.drag_over {
-        let page = if n.drag_over { Page::Shelf } else { n.page };
+        let page = n.shown_page();
         let (w, h) = page.size(n.lyrics_view && page == Page::Music);
         (w, h, 30.0)
     } else if app.cfg.minimal && !has_activity(app) {
@@ -346,7 +355,7 @@ pub fn set_page(app: &mut App, page: Page) {
 }
 
 fn step_page(app: &mut App, delta: i32) {
-    let pages = Notch::pages(&app.cfg);
+    let pages = visible_pages(app);
     let i = pages.iter().position(|p| *p == app.notch.page).unwrap_or(0) as i32;
     let j = (i + delta).clamp(0, pages.len() as i32 - 1) as usize;
     if j as i32 == i {
@@ -405,23 +414,46 @@ pub fn config_changed(app: &mut App, old: &Config) {
     if old.display != app.cfg.display || old.size != app.cfg.size || old.display_follow != app.cfg.display_follow {
         relocate(app);
     }
-    if !app.cfg.calendar_page && app.notch.page == Page::Calendar {
-        app.notch.page = Page::Todo;
-    }
-    if !app.cfg.stats_page && app.notch.page == Page::Stats {
-        app.notch.page = Page::Todo;
+    if old.hidden_pages != app.cfg.hidden_pages || old.clipboard_history != app.cfg.clipboard_history {
+        leave_hidden_page(app);
     }
     if old.clipboard_limit != app.cfg.clipboard_limit {
         app.clips.set_limit(app.cfg.clipboard_limit);
     }
+    if old.clipboard_keep_min() != app.cfg.clipboard_keep_min() {
+        app.clips.set_keep(app.cfg.clipboard_keep_min());
+    }
     if old.clipboard_history && !app.cfg.clipboard_history {
         // Turning history off also forgets what was kept.
         app.clips.clear();
-        app.notch.shelf_tab = 0;
     }
     check_fullscreen(app);
     schedule(app);
     request_frame(app);
+}
+
+/// Pages in the page bar: the ones switched on, plus the one on screen if it was opened anyway
+/// (a file drop shows the Shelf, "+ Add" on the Calendar opens To-do). Never empty.
+pub fn visible_pages(app: &App) -> Vec<Page> {
+    let shown = Notch::pages(&app.cfg);
+    let current = app.notch.shown_page();
+    let pages: Vec<Page> = Page::ALL.iter().copied().filter(|p| shown.contains(p) || *p == current).collect();
+    if pages.is_empty() {
+        vec![Page::Music]
+    } else {
+        pages
+    }
+}
+
+/// The page on screen was switched off: move to the nearest page still showing.
+fn leave_hidden_page(app: &mut App) {
+    let shown = Notch::pages(&app.cfg);
+    if shown.is_empty() || shown.contains(&app.notch.page) {
+        return;
+    }
+    let at = Page::ALL.iter().position(|p| *p == app.notch.page).unwrap_or(0);
+    let next = Page::ALL[at..].iter().chain(Page::ALL[..at].iter().rev()).find(|p| shown.contains(p));
+    app.notch.page = next.copied().unwrap_or(shown[0]);
 }
 
 pub fn relocate(app: &mut App) {
@@ -628,6 +660,7 @@ pub fn on_lang_timer(app: &mut App) {
 }
 
 fn on_idle_check(app: &mut App) {
+    app.clips.heartbeat(store::now());
     let idle = sys::idle_seconds();
     let was = app.notch.idle_mode;
     app.notch.idle_mode = idle >= IDLE_MASCOT_S || (was && app.notch.mascot.mood != crate::mascot::Mood::Awake);

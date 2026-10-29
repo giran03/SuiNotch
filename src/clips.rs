@@ -1,8 +1,11 @@
-//! Clipboard history for the Shelf: the last texts and images copied anywhere, newest first.
-//! Kept in memory only; images are written as .bmp files so they can be dragged out, and the
-//! folder is emptied on every start. Content that password managers mark as private is skipped.
+//! Clipboard history: the last texts and images copied anywhere, newest first. Images are
+//! written as .bmp files so they can be dragged out. The history is saved so a quick restart
+//! (an update, a crash) keeps it; after a longer break it is deleted at the next start.
+//! Content that password managers mark as private is skipped.
 
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
@@ -17,8 +20,16 @@ const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
 const BMP_HEADER: usize = 14;
+const SAVE_FILE: &str = "clips.json";
+/// Written once a minute while there is history, so a restart can tell how long SuiNotch was off.
+const ALIVE_FILE: &str = "clips.alive";
+const ALIVE_EVERY_S: i64 = 60;
+/// How long SuiNotch may be off and still get its history back, in minutes (0 = never kept).
+pub const KEEP_MIN: [u32; 4] = [0, 5, 60, 1440];
+pub const KEEP_LABELS: [&str; 4] = ["Never", "5 min", "1 hour", "1 day"];
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum Clip {
     Text(String),
     Image { path: PathBuf, w: u32, h: u32 },
@@ -29,16 +40,94 @@ pub struct Clips {
     next: u64,
     /// How many items to keep; older ones drop off as new ones arrive.
     limit: usize,
+    /// Save to disk so a quick restart keeps the history.
+    persist: bool,
+    last_alive: i64,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Saved {
+    saved_at: i64,
+    next: u64,
+    items: Vec<Clip>,
+}
+
+/// The saved history comes back only if SuiNotch was off for at most `keep_min` minutes.
+fn should_restore(last_seen: i64, now: i64, keep_min: u32) -> bool {
+    keep_min > 0 && last_seen > 0 && now >= last_seen && now - last_seen <= keep_min as i64 * 60
+}
+
+fn data_file(name: &str) -> PathBuf {
+    crate::config::data_dir().join(name)
 }
 
 impl Clips {
     pub fn new(limit: u32) -> Self {
-        Clips { items: Vec::new(), next: 0, limit: limit.max(1) as usize }
+        Clips { items: Vec::new(), next: 0, limit: limit.max(1) as usize, persist: false, last_alive: 0 }
+    }
+
+    /// Last session's history if SuiNotch was off only briefly, else an empty one (and the old
+    /// files are deleted).
+    pub fn restore(limit: u32, keep_min: u32, now: i64) -> Self {
+        let mut clips = Clips::new(limit);
+        clips.persist = keep_min > 0;
+        let saved: Saved = crate::config::load_json(SAVE_FILE);
+        let alive = std::fs::read_to_string(data_file(ALIVE_FILE)).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        if !should_restore(saved.saved_at.max(alive), now, keep_min) {
+            clips.forget_files();
+            return clips;
+        }
+        clips.next = saved.next;
+        clips.items = saved.items.into_iter().filter(|c| !matches!(c, Clip::Image { path, .. } if !path.exists())).collect();
+        clips.trim();
+        // Images no longer in the list (dropped while SuiNotch was closing) go too.
+        let kept: Vec<PathBuf> = clips.items.iter().filter_map(|c| if let Clip::Image { path, .. } = c { Some(path.clone()) } else { None }).collect();
+        if let Ok(entries) = std::fs::read_dir(dir()) {
+            for e in entries.flatten() {
+                if !kept.contains(&e.path()) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        clips
     }
 
     pub fn set_limit(&mut self, limit: u32) {
         self.limit = limit.max(1) as usize;
         self.trim();
+        self.save();
+    }
+
+    /// Turns saving on or off; off deletes what was saved.
+    pub fn set_keep(&mut self, keep_min: u32) {
+        self.persist = keep_min > 0;
+        if self.persist {
+            self.save();
+        } else {
+            let _ = std::fs::remove_file(data_file(SAVE_FILE));
+            let _ = std::fs::remove_file(data_file(ALIVE_FILE));
+        }
+    }
+
+    pub fn save(&self) {
+        if self.persist {
+            crate::config::save_json(SAVE_FILE, &Saved { saved_at: crate::store::now(), next: self.next, items: self.items.clone() });
+        }
+    }
+
+    /// Notes that SuiNotch is still running, at most once a minute and only while there is history.
+    pub fn heartbeat(&mut self, now: i64) {
+        if self.persist && !self.items.is_empty() && now - self.last_alive >= ALIVE_EVERY_S {
+            self.last_alive = now;
+            let _ = std::fs::write(data_file(ALIVE_FILE), now.to_string());
+        }
+    }
+
+    fn forget_files(&self) {
+        let _ = std::fs::remove_dir_all(dir());
+        let _ = std::fs::remove_file(data_file(SAVE_FILE));
+        let _ = std::fs::remove_file(data_file(ALIVE_FILE));
     }
 
     pub fn push_text(&mut self, text: &str) -> bool {
@@ -80,7 +169,7 @@ impl Clips {
 
     pub fn clear(&mut self) {
         self.items.clear();
-        let _ = std::fs::remove_dir_all(dir());
+        self.forget_files();
     }
 }
 
@@ -96,9 +185,8 @@ pub fn dir() -> PathBuf {
     crate::config::data_dir().join("clips")
 }
 
-/// Starts watching the clipboard and drops images left over from the last run.
+/// Starts watching the clipboard.
 pub fn start(hwnd: HWND) {
-    let _ = std::fs::remove_dir_all(dir());
     unsafe {
         if let Err(e) = AddClipboardFormatListener(hwnd) {
             crate::log(&format!("clipboard history unavailable: {e}"));
@@ -108,11 +196,15 @@ pub fn start(hwnd: HWND) {
 
 /// The clipboard changed: keep its text or image. Returns true when the history changed.
 pub fn capture(clips: &mut Clips, hwnd: HWND) -> bool {
-    match read(hwnd) {
+    let changed = match read(hwnd) {
         Some(Captured::Text(t)) => clips.push_text(&t),
         Some(Captured::Image(dib)) => clips.push_image(&dib),
         None => false,
+    };
+    if changed {
+        clips.save();
     }
+    changed
 }
 
 enum Captured {
@@ -248,6 +340,26 @@ mod tests {
         assert_eq!(c.items.len(), DEFAULT_LIMIT as usize);
         assert_eq!(c.items[0], Clip::Text("item 5".into()));
         assert_eq!(c.items.iter().filter(|i| **i == Clip::Text("item 5".into())).count(), 1);
+    }
+
+    #[test]
+    fn history_returns_only_after_a_short_break() {
+        let t = 1_800_000_000;
+        assert!(should_restore(t - 4 * 60, t, 5));
+        assert!(!should_restore(t - 6 * 60, t, 5));
+        assert!(should_restore(t - 23 * 3600, t, 1440));
+        // Never keep, nothing saved, or a clock that went backwards.
+        assert!(!should_restore(t - 10, t, 0));
+        assert!(!should_restore(0, t, 1440));
+        assert!(!should_restore(t + 60, t, 1440));
+    }
+
+    #[test]
+    fn saved_history_round_trips() {
+        let saved = Saved { saved_at: 5, next: 2, items: vec![Clip::Text("hi".into()), Clip::Image { path: PathBuf::from("a.bmp"), w: 3, h: 4 }] };
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: Saved = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.saved_at, back.next, back.items), (5, 2, saved.items));
     }
 
     #[test]

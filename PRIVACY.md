@@ -6,7 +6,7 @@ SuiNotch has no accounts, no analytics and no telemetry. Everything it keeps abo
 
 Your settings, to-dos, water log, stats, lyrics timing tweaks and shelf items are saved in `%APPDATA%\SuiNotch`, along with a small log file for troubleshooting. If you add a calendar link, the link and a copy of the calendar are kept there too. Nothing in that folder is uploaded anywhere. Uninstalling SuiNotch and deleting that folder removes all of it.
 
-Clipboard history is kept in memory while SuiNotch runs; copied images are written to `%APPDATA%\SuiNotch\clips` so they can be dragged out, and that folder is emptied each time SuiNotch starts. Copies that password managers and other apps mark as private are never kept. You can turn clipboard history off in Settings > Shelf.
+Clipboard history is saved in `%APPDATA%\SuiNotch` (`clips.json`, with copied images in the `clips` folder) so it survives a quick restart such as an update. If SuiNotch was off for longer than the time set in Settings > Clipboard (5 minutes by default), it is deleted at the next start; set that to Never to keep the history in memory only. Copies that password managers and other apps mark as private are never kept. You can turn clipboard history off in Settings > Clipboard, which deletes it.
 
 Song details and playback state come from Windows' own media controls and are only shown in the notch.
 

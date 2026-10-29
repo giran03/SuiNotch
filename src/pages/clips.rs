@@ -1,32 +1,19 @@
-//! The Shelf page's tabs and its clipboard history: recent texts and images, newest first.
+//! The Clipboard page: recent texts and images copied anywhere, newest first.
 //! Click to copy again, drag to drop anywhere.
 
 use crate::app::App;
 use crate::clips::Clip;
 use crate::gfx::{icon, Align, Canvas, C, R};
 use crate::notch::Hit;
-use crate::views::{accent, hit, hovered, pill_button, DIM, FAINT};
+use crate::views::{accent, hit, hovered, pill_button, DIM};
 
 use super::{thumbnail, TILE_W};
 
-pub fn tabs(cv: &Canvas, app: &mut App, area: R) {
-    let counts = [app.shelf.items.len(), app.clips.items.len()];
-    let mut x = area.x;
-    for (i, label) in ["Shelf", "Clipboard"].iter().enumerate() {
-        let text = format!("{label}  {}", counts[i]);
-        let w = app.gfx.text_width(&text, 12.0, 600) + 22.0;
-        let r = R::new(x, area.y - 4.0, w, 24.0);
-        let h = Hit::ShelfTab(i as u8);
-        hit(app, r, h);
-        let on = app.notch.shelf_tab == i as u8;
-        cv.fill_rrect(r, 12.0, if on { C::WHITE.a(0.16) } else if hovered(app, h) { FAINT } else { C::CLEAR });
-        cv.text(&text, r, 12.0, 600, if on { C::WHITE } else { DIM }, Align::Center);
-        x += w + 4.0;
-    }
-}
-
 pub fn clipboard(cv: &mut Canvas, app: &mut App, area: R) {
     let accent = accent(app);
+    let count = app.clips.items.len();
+    let header = format!("{count} item{}  ·  click to copy, drag to drop", if count == 1 { "" } else { "s" });
+    cv.text(&header, R::new(area.x, area.y - 2.0, area.w - 80.0, 20.0), 12.0, 500, DIM, Align::Left);
     if !app.clips.items.is_empty() {
         pill_button(cv, app, R::new(area.right() - 62.0, area.y - 4.0, 62.0, 24.0), "Clear", Hit::ClipClear, false);
     }
@@ -40,7 +27,7 @@ pub fn clipboard(cv: &mut Canvas, app: &mut App, area: R) {
         cv.text(&sub, R::new(zone.x, zone.cy() + 13.0, zone.w, 16.0), 11.5, 500, DIM, Align::Center);
         return;
     }
-    let scroll = app.notch.shelf_scroll.value;
+    let scroll = app.notch.clip_scroll.value;
     cv.push_clip_rrect(list.inset(-2.0, -2.0), 12.0, 1.0);
     let items = app.clips.items.clone();
     for (i, clip) in items.iter().enumerate() {

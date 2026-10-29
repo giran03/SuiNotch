@@ -27,6 +27,7 @@ mod clips;
 pub mod focus;
 mod stats;
 
+pub use clips::clipboard;
 pub use focus::timer;
 pub use stats::stats;
 
@@ -303,16 +304,8 @@ pub fn shelf(cv: &mut Canvas, app: &mut App, area: R) {
     }
     let count = app.shelf.items.len();
     let accent = accent(app);
-    if app.cfg.clipboard_history && !app.notch.drag_over {
-        clips::tabs(cv, app, area);
-        if app.notch.shelf_tab == 1 {
-            clips::clipboard(cv, app, area);
-            return;
-        }
-    } else {
-        let header = format!("{count} item{}", if count == 1 { "" } else { "s" });
-        cv.text(&header, R::new(area.x, area.y - 2.0, 160.0, 20.0), 12.0, 500, DIM, Align::Left);
-    }
+    let header = format!("{count} item{}", if count == 1 { "" } else { "s" });
+    cv.text(&header, R::new(area.x, area.y - 2.0, 160.0, 20.0), 12.0, 500, DIM, Align::Left);
     if count > 0 && !app.notch.drag_over {
         let mut x = area.right();
         let clear_w = 62.0;

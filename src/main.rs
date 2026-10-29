@@ -109,7 +109,7 @@ fn run() -> windows::core::Result<()> {
         timer: timers::Countdown::new(cfg.timer_min),
         stopwatch: timers::Stopwatch::default(),
         stats: config::load_json("stats.json"),
-        clips: clips::Clips::new(cfg.clipboard_limit),
+        clips: clips::Clips::restore(cfg.clipboard_limit, cfg.clipboard_keep_min(), store::now()),
         calendar: Vec::new(),
         calendar_error: String::new(),
         calendar_synced: None,
@@ -159,6 +159,8 @@ fn run() -> windows::core::Result<()> {
             DispatchMessageW(&msg);
         }
     }
+    // Closing normally: note the time, so a quick restart restores the clipboard history.
+    app::with(|app| app.clips.save());
     tray::remove(hwnd);
     Ok(())
 }

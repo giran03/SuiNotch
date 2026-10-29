@@ -19,6 +19,8 @@ pub(super) const ROW: f32 = 48.0;
 pub(super) const ROW_SUB: f32 = 56.0;
 /// A row with a label above a button group, with room between them.
 pub(super) const ROW_SEG: f32 = 96.0;
+/// Knob springs for page switches are keyed from here, clear of field-address keys.
+const PAGE_KNOBS: usize = 1;
 /// Line height of release notes on the "What's new" page.
 pub(super) const NOTE_LINE: f32 = 19.0;
 
@@ -68,19 +70,34 @@ impl Ui<'_, '_> {
     pub(super) fn toggle(&mut self, cfg: &Config, r: R, label: &str, sub: Option<&str>, f: BoolField) {
         self.label(r, label, sub);
         let on = *f(&mut cfg.clone());
-        let id = f as usize;
+        self.switch(cfg, r, f as usize, on, Act::Toggle(f), true);
+    }
+
+    /// A switch for one notch page; the last page still showing can't be switched off.
+    pub(super) fn page_toggle(&mut self, cfg: &Config, r: R, index: usize, sub: &str) {
+        let page = crate::notch::Page::ALL[index];
+        self.label(r, page.label(), Some(sub));
+        let on = cfg.page_shown(page.key());
+        let last = on && crate::notch::Notch::pages(cfg) == [page];
+        self.switch(cfg, r, PAGE_KNOBS + index, on, Act::PageToggle(index), !last);
+    }
+
+    /// The on/off switch at the right of a row, animated by a knob spring keyed by `id`.
+    fn switch(&mut self, cfg: &Config, r: R, id: usize, on: bool, act: Act, enabled: bool) {
         let knob = self.s.knobs.entry(id).or_insert_with(|| Spring::new(if on { 1.0 } else { 0.0 }, 0.28, 0.72));
         knob.set(if on { 1.0 } else { 0.0 });
         self.moving |= knob.step(self.dt);
         let t = knob.value;
         let sw = R::new(r.right() - 16.0 - 44.0, r.cy() - 12.0, 44.0, 24.0);
-        let act = Act::Toggle(f);
-        self.s.hits.push((r, act));
-        let off = C::WHITE.a(if hovered(self.s, act) { 0.22 } else { 0.16 });
-        self.cv.fill_rrect(sw, 12.0, off.mix(Self::accent(cfg), t.clamp(0.0, 1.0)));
+        if enabled {
+            self.s.hits.push((r, act));
+        }
+        let fade = if enabled { 1.0 } else { 0.45 };
+        let off = C::WHITE.a(if enabled && hovered(self.s, act) { 0.22 } else { 0.16 });
+        self.cv.fill_rrect(sw, 12.0, off.mix(Self::accent(cfg), t.clamp(0.0, 1.0)).a(fade));
         let kx = sw.x + 12.0 + t * 20.0;
-        let stretch = if self.s.pressed == Some(act) { 4.0 } else { 0.0 };
-        self.cv.fill_rrect(R::new(kx - 9.0 - stretch * (1.0 - t), sw.cy() - 9.0, 18.0 + stretch, 18.0), 9.0, C::WHITE);
+        let stretch = if enabled && self.s.pressed == Some(act) { 4.0 } else { 0.0 };
+        self.cv.fill_rrect(R::new(kx - 9.0 - stretch * (1.0 - t), sw.cy() - 9.0, 18.0 + stretch, 18.0), 9.0, C::WHITE.a(fade));
     }
 
     pub(super) fn segmented(&mut self, cfg: &Config, r: R, labels: &[&str], f: IndexField) {

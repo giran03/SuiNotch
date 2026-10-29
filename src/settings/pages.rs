@@ -21,7 +21,8 @@ impl Ui<'_, '_> {
             6 => self.pomodoro(&cfg),
             7 => self.water(&cfg),
             8 => self.shelf(&cfg, app.shelf.items.len()),
-            9 => self.hud(&cfg),
+            9 => self.clipboard(&cfg, app.clips.items.len()),
+            10 => self.hud(&cfg),
             CHANGELOG_PAGE => self.changelog(),
             _ => self.about(&cfg, &app.update),
         }
@@ -36,13 +37,29 @@ impl Ui<'_, '_> {
         self.section("Startup");
         let r = self.card(&[ROW]);
         self.toggle(c, r[0], "Start with Windows", None, |c| &mut c.start_with_windows);
+        self.section("Pages in the notch");
+        let subs = [
+            "Now playing, controls and lyrics",
+            "Pomodoro, timer and stopwatch",
+            "Today's water and the hourly chart",
+            "Files and text you drop on the notch",
+            "Recent copies, while clipboard history is on",
+            "Your tasks and reminders",
+            "Your month, tasks and calendar events",
+            "This week's focus, water and tasks, with streaks",
+        ];
+        let r = self.card(&[ROW_SUB; 8]);
+        for (i, sub) in subs.iter().enumerate() {
+            self.page_toggle(c, r[i], i, sub);
+        }
+        self.cv.text("Hidden pages keep working: reminders, timers and clipboard history carry on.", R::new(self.x + 4.0, self.y - 12.0, self.w, 18.0), 11.5, 500, DIM, Align::Left);
+        self.y += 14.0;
         self.section("Notch");
-        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.seg_row(c, r[0], "Size", Some("Applies right away. Auto is larger on wide monitors"), &config::SIZE_LABELS, |c| &mut c.size);
         self.toggle(c, r[1], "Minimal notch", Some("A thin line when nothing is playing"), |c| &mut c.minimal);
         self.toggle(c, r[2], "Sui mascot", Some("A little droplet that lives in the notch"), |c| &mut c.mascot);
         self.toggle(c, r[3], "Sui reactions", Some("Sui cheers for finished focus sessions, goals and tasks, and naps on long breaks"), |c| &mut c.sui_reactions);
-        self.toggle(c, r[4], "Stats page", Some("This week's focus time, water and tasks, with streaks"), |c| &mut c.stats_page);
         self.section("Sounds and quiet");
         let r = self.card(&[ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Reminder sounds", Some("Chimes for Pomodoro, To-do and Water"), |c| &mut c.sounds);
@@ -162,14 +179,11 @@ impl Ui<'_, '_> {
     fn calendar(&mut self, c: &Config, app: &App) {
         self.title("Calendar");
         self.section("Calendar page");
-        let r = self.card(&[ROW_SUB, ROW_SEG, ROW_SUB]);
-        self.toggle(c, r[0], "Show the Calendar page", Some("A month view of your tasks in the notch"), |c| &mut c.calendar_page);
-        let mut idx = if c.week_starts_monday { 0usize } else { 1 };
-        let _ = &mut idx;
-        self.label(R::new(r[1].x, r[1].y, r[1].w, 38.0).offset(0.0, 4.0), "Week starts on", None);
-        let bar = R::new(r[1].x + 16.0, r[1].bottom() - 42.0, r[1].w - 32.0, 30.0);
+        let r = self.card(&[ROW_SEG, ROW_SUB]);
+        self.label(R::new(r[0].x, r[0].y, r[0].w, 38.0).offset(0.0, 4.0), "Week starts on", None);
+        let bar = R::new(r[0].x + 16.0, r[0].bottom() - 42.0, r[0].w - 32.0, 30.0);
         self.week_seg(c, bar);
-        self.toggle(c, r[2], "Day dots", Some("Mark days that have tasks or events"), |c| &mut c.calendar_dots);
+        self.toggle(c, r[1], "Day dots", Some("Mark days that have tasks or events"), |c| &mut c.calendar_dots);
         self.calendar_link(c, app);
     }
 
@@ -252,22 +266,33 @@ impl Ui<'_, '_> {
         self.toggle(c, r[0], "Open the shelf when dragging", Some("The notch opens as files move over it"), |c| &mut c.shelf_open_on_drag);
         self.toggle(c, r[1], "Remove after dragging out", Some("Otherwise items stay until you remove them"), |c| &mut c.shelf_remove_after_drag);
         self.toggle(c, r[2], "Show file sizes", None, |c| &mut c.shelf_show_sizes);
-        self.section("Clipboard history");
-        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
-        self.toggle(c, r[0], "Keep clipboard history", Some("Texts and images you copy, until SuiNotch closes"), |c| &mut c.clipboard_history);
-        let (lo, hi) = (crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
-        self.stepper(c, r[1], "Items to keep", Some("Older copies drop off as new ones arrive"), |c| &mut c.clipboard_limit, 5, lo, hi, &|v| format!("{v} items"));
-        self.button(r[2], "Clear clipboard history", Some("Password managers' copies are never kept"), "Clear", Act::ClearClips, true);
         self.section("Items");
         let r = self.card(&[ROW_SUB]);
         let sub = format!("{count} item{} on the shelf. Files themselves are not touched", if count == 1 { "" } else { "s" });
         self.button(r[0], "Clear the shelf", Some(&sub), "Clear all", Act::ClearShelf, true);
     }
 
+    fn clipboard(&mut self, c: &Config, count: usize) {
+        self.title("Clipboard");
+        self.section("History");
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SEG]);
+        self.toggle(c, r[0], "Keep clipboard history", Some("Texts and images you copy, on the Clipboard page"), |c| &mut c.clipboard_history);
+        let (lo, hi) = (crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
+        self.stepper(c, r[1], "Items to keep", Some("Older copies drop off as new ones arrive"), |c| &mut c.clipboard_limit, 5, lo, hi, &|v| format!("{v} items"));
+        self.seg_row(c, r[2], "Keep after a restart", Some("History comes back if SuiNotch was off for less than this"), &crate::clips::KEEP_LABELS, |c| &mut c.clipboard_keep);
+        self.section("When you copy");
+        let r = self.card(&[ROW_SUB]);
+        self.toggle(c, r[0], "Show a popup", Some("A short note in the notch with what you copied"), |c| &mut c.hud_clipboard);
+        self.section("Privacy");
+        let r = self.card(&[ROW_SUB]);
+        let sub = format!("{count} item{} kept now. Password managers' copies are never kept", if count == 1 { "" } else { "s" });
+        self.button(r[0], "Clear clipboard history", Some(&sub), "Clear", Act::ClearClips, true);
+    }
+
     fn hud(&mut self, c: &Config) {
         self.title("HUD and popups");
         self.section("Show an overlay for");
-        let r = self.card(&[ROW, ROW, ROW, ROW, ROW, ROW, ROW, ROW_SUB]);
+        let r = self.card(&[ROW, ROW, ROW, ROW, ROW, ROW, ROW]);
         self.toggle(c, r[0], "Volume", None, |c| &mut c.hud_volume);
         self.toggle(c, r[1], "Brightness", None, |c| &mut c.hud_brightness);
         self.toggle(c, r[2], "Caps Lock", None, |c| &mut c.hud_caps);
@@ -275,7 +300,6 @@ impl Ui<'_, '_> {
         self.toggle(c, r[4], "Battery and charger", None, |c| &mut c.hud_battery);
         self.toggle(c, r[5], "Wi-Fi", None, |c| &mut c.hud_wifi);
         self.toggle(c, r[6], "Headphones", None, |c| &mut c.hud_headphones);
-        self.toggle(c, r[7], "Copied to clipboard", Some("Text and images, while clipboard history is on"), |c| &mut c.hud_clipboard);
         self.section("Style");
         let r = self.card(&[ROW_SEG, ROW_SEG]);
         self.seg_row(c, r[0], "Layout", Some("Compact fits the notch, Wide adds a label"), &config::HUD_STYLE_LABELS, |c| &mut c.hud_style);

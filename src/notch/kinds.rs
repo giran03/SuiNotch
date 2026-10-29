@@ -10,13 +10,28 @@ pub enum Page {
     Timer,
     Water,
     Shelf,
+    Clipboard,
     Todo,
     Calendar,
     Stats,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [Page::Music, Page::Timer, Page::Water, Page::Shelf, Page::Todo, Page::Calendar, Page::Stats];
+    pub const ALL: [Page; 8] = [Page::Music, Page::Timer, Page::Water, Page::Shelf, Page::Clipboard, Page::Todo, Page::Calendar, Page::Stats];
+    /// Stable name used in settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Page::Music => "music",
+            Page::Timer => "focus",
+            Page::Water => "water",
+            Page::Shelf => "shelf",
+            Page::Clipboard => "clipboard",
+            Page::Todo => "todo",
+            Page::Calendar => "calendar",
+            Page::Stats => "stats",
+        }
+    }
+
     pub fn icon(self) -> char {
         use crate::gfx::icon;
         match self {
@@ -24,6 +39,7 @@ impl Page {
             Page::Timer => icon::TIMER,
             Page::Water => '\u{E81E}',
             Page::Shelf => icon::FOLDER,
+            Page::Clipboard => icon::CLIPBOARD,
             Page::Todo => icon::CHECK,
             Page::Calendar => icon::CALENDAR,
             Page::Stats => icon::CHART,
@@ -35,6 +51,7 @@ impl Page {
             Page::Timer => "Focus",
             Page::Water => "Water",
             Page::Shelf => "Shelf",
+            Page::Clipboard => "Clipboard",
             Page::Todo => "To-do",
             Page::Calendar => "Calendar",
             Page::Stats => "Stats",
@@ -47,7 +64,7 @@ impl Page {
             Page::Music => (580.0, 190.0),
             Page::Timer => (560.0, 212.0),
             Page::Water => (600.0, 204.0),
-            Page::Shelf => (620.0, 200.0),
+            Page::Shelf | Page::Clipboard => (620.0, 200.0),
             Page::Todo => (600.0, 250.0),
             Page::Calendar => (640.0, 268.0),
             Page::Stats => (600.0, 226.0),
@@ -114,8 +131,6 @@ pub enum Hit {
     Drink,
     WaterUndo,
     ShelfItem(usize),
-    /// 0 shows the shelf, 1 the clipboard history.
-    ShelfTab(u8),
     ClipItem(usize),
     ClipClear,
     ShelfSelect,

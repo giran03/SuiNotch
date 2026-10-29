@@ -93,7 +93,9 @@ pub(super) fn frame(app: &mut App) {
     n.h.set(th);
     n.radius.set(tr);
     n.open.set(if (n.expanded || n.drag_over) && n.alert.is_none() && n.hud.is_none() { 1.0 } else { 0.0 });
-    let idx = Notch::pages(&app.cfg).iter().position(|p| *p == n.page).unwrap_or(0) as f32;
+    let shown = app.notch.shown_page();
+    let idx = visible_pages(app).iter().position(|p| *p == shown).unwrap_or(0) as f32;
+    let n = &mut app.notch;
     n.page_pos.set(idx);
     update_pill(app);
 

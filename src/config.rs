@@ -31,7 +31,11 @@ pub struct Config {
     pub respect_quiet: bool,
     /// Sui cheers for finished sessions and goals, and dozes through long breaks.
     pub sui_reactions: bool,
+    /// Old Stats switch, read once to carry the choice into `hidden_pages`; never written.
+    #[serde(skip_serializing)]
     pub stats_page: bool,
+    /// Notch pages switched off in Settings, by `Page::key`. Their features keep working.
+    pub hidden_pages: Vec<String>,
     // Display
     pub display: Option<String>,
     /// Move the notch to whichever monitor holds the active window.
@@ -60,6 +64,8 @@ pub struct Config {
     pub todo_show_done: bool,
     pub todo_clear_done_daily: bool,
     // Calendar
+    /// Old Calendar switch, read once to carry the choice into `hidden_pages`; never written.
+    #[serde(skip_serializing)]
     pub calendar_page: bool,
     pub week_starts_monday: bool,
     pub calendar_dots: bool,
@@ -89,6 +95,8 @@ pub struct Config {
     pub shelf_show_sizes: bool,
     pub clipboard_history: bool,
     pub clipboard_limit: u32,
+    /// Index into clips::KEEP_MIN: how long SuiNotch may be off and keep its clipboard history.
+    pub clipboard_keep: usize,
     // HUD and popups
     pub hud_volume: bool,
     pub hud_brightness: bool,
@@ -118,6 +126,7 @@ impl Default for Config {
             respect_quiet: true,
             sui_reactions: true,
             stats_page: true,
+            hidden_pages: Vec::new(),
             display: None,
             display_follow: false,
             expand_on_hover: true,
@@ -162,6 +171,7 @@ impl Default for Config {
             shelf_show_sizes: true,
             clipboard_history: true,
             clipboard_limit: crate::clips::DEFAULT_LIMIT,
+            clipboard_keep: 1,
             hud_volume: true,
             hud_brightness: true,
             hud_caps: true,
@@ -213,6 +223,14 @@ impl Config {
     pub fn snooze_min(&self) -> u32 {
         SNOOZE_MIN[self.todo_snooze.min(3)]
     }
+    /// Minutes SuiNotch may be off and still restore its clipboard history (0 = never).
+    pub fn clipboard_keep_min(&self) -> u32 {
+        if self.clipboard_history {
+            crate::clips::KEEP_MIN[self.clipboard_keep.min(crate::clips::KEEP_MIN.len() - 1)]
+        } else {
+            0
+        }
+    }
     pub fn hud_ms(&self) -> u32 {
         HUD_DURATION_MS[self.hud_duration.min(2)]
     }
@@ -236,13 +254,28 @@ impl Config {
         self.focus_mode = self.focus_mode.min(2);
         self.timer_min = self.timer_min.clamp(1, crate::timers::MAX_MIN);
         self.clipboard_limit = self.clipboard_limit.clamp(crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
+        self.clipboard_keep = self.clipboard_keep.min(crate::clips::KEEP_MIN.len() - 1);
         self.glass_ml = self.glass_ml.clamp(50, 2000);
         self.goal_ml = self.goal_ml.clamp(500, 6000);
         self.water_start_hour = self.water_start_hour.min(23);
         self.water_end_hour = self.water_end_hour.clamp(self.water_start_hour + 1, 24);
         self.water_interval_min = self.water_interval_min.clamp(15, 240);
         self.update_mode = self.update_mode.min(crate::update::MODE_LABELS.len() - 1);
+        for (shown, key) in [(self.calendar_page, "calendar"), (self.stats_page, "stats")] {
+            if !shown && !self.hidden_pages.iter().any(|k| k == key) {
+                self.hidden_pages.push(key.to_string());
+            }
+        }
+        self.calendar_page = true;
+        self.stats_page = true;
+        self.hidden_pages.sort();
+        self.hidden_pages.dedup();
         self
+    }
+
+    /// Whether the notch page with this key is switched on.
+    pub fn page_shown(&self, key: &str) -> bool {
+        !self.hidden_pages.iter().any(|k| k == key)
     }
 }
 
@@ -298,6 +331,18 @@ mod tests {
         assert_eq!(c.focus_min, 50);
         assert_eq!(c.short_break_min, 5);
         assert!(c.hud_volume);
+    }
+
+    #[test]
+    fn old_page_switches_carry_over_and_are_not_written_back() {
+        let c: Config = serde_json::from_str::<Config>(r#"{"calendar_page": false, "hidden_pages": ["water"]}"#).unwrap().sanitized();
+        assert!(!c.page_shown("calendar"));
+        assert!(!c.page_shown("water"));
+        assert!(c.page_shown("stats"));
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(!json.contains("calendar_page"));
+        let again: Config = serde_json::from_str::<Config>(&json).unwrap().sanitized();
+        assert_eq!(again.hidden_pages, vec!["calendar".to_string(), "water".to_string()]);
     }
 
     #[test]
