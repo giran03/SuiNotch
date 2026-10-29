@@ -301,7 +301,7 @@ pub fn monitor_scale(cfg: &Config, m: &Monitor) -> f32 {
 
 impl Notch {
     pub fn create(cfg: &Config) -> Result<Notch> {
-        let monitor = sys::pick_monitor(cfg.display.as_deref()).unwrap_or(Monitor {
+        let monitor = sys::pick_monitor(crate::profile::display_override().or(cfg.display.clone()).as_deref()).unwrap_or(Monitor {
             device: String::new(),
             rect: RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
             top: 0,
@@ -821,7 +821,7 @@ pub fn config_changed(app: &mut App, old: &Config) {
 }
 
 pub fn relocate(app: &mut App) {
-    if let Some(m) = sys::pick_monitor(app.cfg.display.as_deref()) {
+    if let Some(m) = sys::pick_monitor(crate::profile::display_override().or(app.cfg.display.clone()).as_deref()) {
         app.notch.scale = monitor_scale(&app.cfg, &m);
         crate::ticker::set_monitor(&m.device);
         app.notch.monitor = m;

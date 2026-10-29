@@ -18,6 +18,19 @@ pub fn demo() -> bool {
     *ON.get_or_init(|| std::env::var_os("SUINOTCH_PROFILE_DEMO").is_some())
 }
 
+/// SUINOTCH_PROFILE_FORCE_TIMER=1 skips vblank sync to exercise the timer fallback
+/// (what Remote Desktop and some VMs get).
+pub fn force_timer() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SUINOTCH_PROFILE_FORCE_TIMER").is_some())
+}
+
+/// SUINOTCH_PROFILE_DISPLAY=\.\DISPLAY2 shows the notch on that monitor for this run only,
+/// without touching the saved settings.
+pub fn display_override() -> Option<String> {
+    std::env::var("SUINOTCH_PROFILE_DISPLAY").ok().filter(|d| !d.is_empty())
+}
+
 #[derive(Default)]
 struct Burst {
     intervals: Vec<f32>,
