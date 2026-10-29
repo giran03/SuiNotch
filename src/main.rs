@@ -2,6 +2,7 @@
 
 mod anim;
 mod app;
+mod changelog;
 mod config;
 mod dnd;
 mod events;
@@ -20,6 +21,7 @@ mod store;
 mod sys;
 mod ticker;
 mod tray;
+mod update;
 mod views;
 
 use std::rc::Rc;
@@ -58,11 +60,16 @@ fn main() {
 
 fn run() -> windows::core::Result<()> {
     let first_run = !config::data_dir().join("config.json").exists();
-    let cfg: config::Config = config::load_json::<config::Config>("config.json").sanitized();
+    let mut cfg: config::Config = config::load_json::<config::Config>("config.json").sanitized();
     let gfx = Rc::new(gfx::Gfx::new()?);
     let events = events::init();
     let notch = notch::Notch::create(&cfg)?;
-    if first_run {
+    // Fresh installs and updates open this version's release notes once.
+    let show_notes = cfg.notes_seen != env!("CARGO_PKG_VERSION");
+    if show_notes {
+        cfg.notes_seen = env!("CARGO_PKG_VERSION").to_string();
+    }
+    if first_run || show_notes {
         config::save_json("config.json", &cfg);
     }
     sys::set_startup(cfg.start_with_windows);
@@ -90,6 +97,7 @@ fn run() -> windows::core::Result<()> {
         caps: false,
         last_battery: None,
         last_day: today,
+        update: update::Status::Idle,
         cfg,
     };
     let hwnd = app.notch.hwnd;
@@ -107,8 +115,12 @@ fn run() -> windows::core::Result<()> {
     sys::start_bluetooth_watch();
     sys::install_hooks();
     sys::listen_for_second_launch();
-    if first_run {
-        app::defer(app::Deferred::OpenSettings(None));
+    if let Some(mode) = app::with(|app| app.cfg.update_mode) {
+        update::start(mode);
+    }
+    if show_notes || first_run {
+        let page = show_notes.then_some(settings::CHANGELOG_PAGE);
+        app::defer(app::Deferred::OpenSettings(page));
         app::with(|_| {});
     }
 

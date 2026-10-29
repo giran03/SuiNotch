@@ -61,6 +61,7 @@ pub struct App {
     pub caps: bool,
     pub last_battery: Option<(u8, bool)>,
     pub last_day: chrono::NaiveDate,
+    pub update: crate::update::Status,
 }
 
 thread_local! {
@@ -136,6 +137,7 @@ impl App {
         if old.start_with_windows != self.cfg.start_with_windows {
             crate::sys::set_startup(self.cfg.start_with_windows);
         }
+        crate::update::set_mode(self.cfg.update_mode);
         self.pomo.durations_changed(&durations(&old), &durations(&self.cfg));
         self.save_config();
         crate::notch::config_changed(self, &old);

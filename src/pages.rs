@@ -487,8 +487,17 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
         }
         let row = R::new(list.x, y, list.w, TODO_ROW - 3.0);
         let color = C::hex(TODO_COLORS[t.color % TODO_COLORS.len()]);
-        let row_hover = app.notch.hover.is_some_and(|h| matches!(h, Hit::TodoTitle(i) | Hit::TodoCheck(i) | Hit::TodoDue(i) | Hit::TodoDelete(i) | Hit::TodoColor(i) if i == t.id));
-        if row_hover || app.notch.due_edit == Some(t.id) {
+        // Registered first so the controls on top win; the gaps between them still count as the row.
+        let row_hit = R::new(row.x, row.y.max(list.y), row.w, row.bottom().min(list.bottom()) - row.y.max(list.y));
+        hit(app, row_hit, Hit::TodoRow(t.id));
+        let row_hover = app.notch.hover.is_some_and(|h| {
+            matches!(h, Hit::TodoRow(i) | Hit::TodoTitle(i) | Hit::TodoCheck(i) | Hit::TodoDue(i) | Hit::TodoDelete(i) | Hit::TodoColor(i) if i == t.id)
+        });
+        // A task being edited (due picker or rename) keeps its controls even when the pointer leaves it.
+        let renaming = app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::Rename(t.id));
+        let selected = app.notch.due_edit == Some(t.id) || renaming;
+        let show_controls = row_hover || selected;
+        if show_controls {
             cv.fill_rrect(row, 9.0, C::WHITE.a(0.06));
         }
         // Colour tag
@@ -506,7 +515,7 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
         }
         // Due chip
         let overdue = !t.done && t.due.is_some_and(|d| d <= now);
-        let due_text = t.due.map(|d| due_label(app, d, now)).unwrap_or_else(|| if row_hover { "+ Time".into() } else { String::new() });
+        let due_text = t.due.map(|d| due_label(app, d, now)).unwrap_or_else(|| if show_controls { "+ Time".into() } else { String::new() });
         let dw = if due_text.is_empty() { 0.0 } else { app.gfx.text_width(&due_text, 11.0, 600) + 18.0 };
         let del_x = row.right() - 16.0;
         let chip = R::new(del_x - 18.0 - dw, row.cy() - 10.0, dw, 20.0);
@@ -516,7 +525,7 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
             cv.fill_rrect(chip, 10.0, bg);
             cv.text(&due_text, chip, 11.0, 600, if overdue { C::hex(0xFF8A7A) } else { DIM }, Align::Center);
         }
-        if row_hover {
+        if show_controls {
             icon_button(cv, app, del_x, row.cy(), 9.0, icon::DELETE, Hit::TodoDelete(t.id), DIM);
         }
         // Title or inline editor

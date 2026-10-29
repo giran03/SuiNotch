@@ -80,6 +80,10 @@ pub struct Config {
     pub hud_headphones: bool,
     pub hud_duration: usize,
     pub hud_style: usize,
+    // About
+    pub update_mode: usize,
+    /// Last version whose "What's new" page was shown; a new install or update shows it once.
+    pub notes_seen: String,
 }
 
 impl Default for Config {
@@ -135,6 +139,8 @@ impl Default for Config {
             hud_headphones: true,
             hud_duration: 1,
             hud_style: 0,
+            update_mode: crate::update::MODE_AUTO,
+            notes_seen: String::new(),
         }
     }
 }
@@ -194,6 +200,7 @@ impl Config {
         self.water_start_hour = self.water_start_hour.min(23);
         self.water_end_hour = self.water_end_hour.clamp(self.water_start_hour + 1, 24);
         self.water_interval_min = self.water_interval_min.clamp(15, 240);
+        self.update_mode = self.update_mode.min(crate::update::MODE_LABELS.len() - 1);
         self
     }
 }

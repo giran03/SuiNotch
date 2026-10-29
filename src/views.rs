@@ -469,7 +469,7 @@ pub fn shelf_overflow(app: &App) -> f32 {
 pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
     let now = store::now();
     match h {
-        Hit::Body => {}
+        Hit::Body | Hit::TodoRow(_) => {}
         Hit::PageDot(p) => notch::set_page(app, p),
         Hit::Settings => {
             notch::collapse(app);

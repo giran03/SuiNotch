@@ -26,6 +26,8 @@ features = [
     "Networking_Connectivity",
     "Devices_Enumeration",
     "Devices_Bluetooth",
+    "Security_Cryptography",
+    "Security_Cryptography_Core",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Direct2D",

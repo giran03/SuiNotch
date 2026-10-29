@@ -49,6 +49,7 @@ pub enum Event {
     AudioDeviceChanged,
     Network { connected: bool, name: String },
     Bluetooth { name: String, connected: bool },
+    Update(crate::update::Status),
 }
 
 static SENDER: OnceLock<Mutex<Sender<Event>>> = OnceLock::new();

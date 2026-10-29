@@ -1,7 +1,13 @@
-//! Embeds the SuiNotch icon and version information into the executable.
+//! Embeds the SuiNotch icon and version information into the executable, and picks the
+//! release notes for the version in Cargo.toml (changelogs/v<version>.md).
+
+use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/suinotch.ico");
+    println!("cargo:rerun-if-changed=changelogs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    embed_changelog();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -15,4 +21,17 @@ fn main() {
         // A missing Windows SDK only costs the icon; the app still builds.
         println!("cargo:warning=icon not embedded: {e}");
     }
+}
+
+/// Bumping the version switches the app to that version's notes; a version without notes
+/// still builds, with a short placeholder.
+fn embed_changelog() {
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let source = format!("changelogs/v{version}.md");
+    let text = std::fs::read_to_string(&source).unwrap_or_else(|_| {
+        println!("cargo:warning=no release notes at {source}");
+        format!("# SuiNotch {version}\n\n- No release notes for this version yet.\n")
+    });
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("changelog.md");
+    std::fs::write(out, text).expect("write changelog");
 }

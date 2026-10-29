@@ -18,11 +18,15 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::anim::Spring;
 use crate::app::{self, App};
+use crate::changelog;
 use crate::config::{self, Config, ACCENTS};
 use crate::gfx::{self, icon, Align, Canvas, C, R};
 use crate::sys::{self, Monitor};
+use crate::update::{self, Status};
 
 pub const ABOUT_PAGE: usize = 10;
+/// "What's new": reached from About, so it has no sidebar entry of its own.
+pub const CHANGELOG_PAGE: usize = 11;
 pub const DEVELOPER: &str = "CafeTako";
 pub const SUPPORT_EMAIL: &str = "support@cafetako.com";
 const W: f32 = 800.0;
@@ -65,6 +69,8 @@ type NumField = fn(&mut Config) -> &mut u32;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Act {
     Page(usize),
+    /// An in-page button that switches pages (scrolls with the content, unlike the sidebar).
+    Link(usize),
     Close,
     Minimize,
     Toggle(BoolField),
@@ -77,6 +83,8 @@ enum Act {
     ResetWater,
     Website,
     Support,
+    CheckUpdate,
+    InstallUpdate,
 }
 
 pub struct SettingsWindow {
@@ -323,7 +331,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 VK_UP | VK_DOWN => {
                     let n = CATEGORIES.len() as i32;
                     let d = if vk == VK_UP { -1 } else { 1 };
-                    s.page = ((s.page as i32 + d).rem_euclid(n)) as usize;
+                    s.page = ((s.page.min(ABOUT_PAGE) as i32 + d).rem_euclid(n)) as usize;
                     s.scroll.snap(0.0);
                     invalidate(s);
                 }
@@ -352,7 +360,7 @@ fn invalidate(s: &SettingsWindow) {
 fn act(app: &mut App, a: Act) {
     let mut c = app.cfg.clone();
     match a {
-        Act::Page(p) => {
+        Act::Page(p) | Act::Link(p) => {
             if let Some(s) = app.settings.as_mut() {
                 s.page = p;
                 s.scroll.snap(0.0);
@@ -411,6 +419,16 @@ fn act(app: &mut App, a: Act) {
             sys::open_url(&format!("mailto:{SUPPORT_EMAIL}?subject=SuiNotch%20{}", env!("CARGO_PKG_VERSION")));
             return;
         }
+        Act::CheckUpdate => {
+            update::check_now();
+            return;
+        }
+        Act::InstallUpdate => {
+            if let Status::Available(release) = &app.update {
+                update::install(release.clone());
+            }
+            return;
+        }
     }
     let accent_changed = c.accent != app.cfg.accent;
     app.set_config(c);
@@ -444,7 +462,7 @@ fn paint_window(app: &mut App, s: &mut SettingsWindow) -> Result<()> {
     }
     let rt = s.rt.clone().expect("render target");
     let gfx = app.gfx.clone();
-    s.side_sel.set(s.page as f32);
+    s.side_sel.set(s.page.min(ABOUT_PAGE) as f32);
     let mut moving = s.scroll.step(dt) | s.side_sel.step(dt);
     unsafe { rt.BeginDraw() };
     {
@@ -494,7 +512,8 @@ fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow) {
     for (i, cat) in CATEGORIES.iter().enumerate() {
         let r = R::new(12.0, y_of(i), SIDEBAR - 24.0, item_h - 2.0);
         s.hits.push((r, Act::Page(i)));
-        if hovered(s, Act::Page(i)) && s.page != i {
+        let current = s.page.min(ABOUT_PAGE) == i;
+        if hovered(s, Act::Page(i)) && !current {
             cv.fill_rrect(r, 9.0, C::WHITE.a(0.04));
         }
         let tile = R::new(r.x + 8.0, r.cy() - 11.0, 22.0, 22.0);
@@ -504,7 +523,7 @@ fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow) {
         } else {
             cv.glyph(cat.glyph, tile.cx(), tile.cy(), 11.5, C::WHITE);
         }
-        cv.text(cat.name, R::new(tile.right() + 12.0, r.y, r.w - 50.0, r.h), 13.0, if s.page == i { 600 } else { 500 }, C::WHITE, Align::Left);
+        cv.text(cat.name, R::new(tile.right() + 12.0, r.y, r.w - 50.0, r.h), 13.0, if current { 600 } else { 500 }, C::WHITE, Align::Left);
     }
 }
 
@@ -538,6 +557,8 @@ struct Ui<'a, 'b> {
 
 const ROW: f32 = 48.0;
 const ROW_SUB: f32 = 56.0;
+/// Line height of release notes on the "What's new" page.
+const NOTE_LINE: f32 = 19.0;
 
 impl Ui<'_, '_> {
     fn accent(cfg: &Config) -> C {
@@ -675,7 +696,8 @@ impl Ui<'_, '_> {
             7 => self.water(&cfg),
             8 => self.shelf(&cfg, app.shelf.items.len()),
             9 => self.hud(&cfg),
-            _ => self.about(),
+            CHANGELOG_PAGE => self.changelog(),
+            _ => self.about(&cfg, &app.update),
         }
         self.s.content_h = self.y - start;
         self.cv.pop();
@@ -890,7 +912,59 @@ impl Ui<'_, '_> {
         self.seg_row(c, r[1], "Stays for", Some("How long an overlay is shown"), &config::HUD_DURATION_LABELS, |c| &mut c.hud_duration);
     }
 
-    fn about(&mut self) {
+    fn changelog(&mut self) {
+        self.title("What's new");
+        let version = env!("CARGO_PKG_VERSION");
+        let r = self.card(&[ROW_SUB]);
+        self.button(r[0], &format!("SuiNotch {version}"), Some("Release notes for the version you're running"), "Back to About", Act::Link(ABOUT_PAGE), false);
+        let blocks = changelog::parse(changelog::TEXT);
+        let mut bullets: Vec<&str> = Vec::new();
+        for block in &blocks {
+            if let changelog::Block::Bullet(b) = block {
+                bullets.push(b);
+                continue;
+            }
+            self.bullet_card(&bullets);
+            bullets.clear();
+            match block {
+                changelog::Block::Heading(h) => self.section(h),
+                changelog::Block::Text(t) => {
+                    let gfx = self.cv.gfx;
+                    for line in changelog::wrap(t, self.w - 8.0, |s| gfx.text_width(s, 13.0, 500)) {
+                        self.cv.text(&line, R::new(self.x + 4.0, self.y, self.w - 8.0, NOTE_LINE), 13.0, 500, DIM, Align::Left);
+                        self.y += NOTE_LINE;
+                    }
+                    self.y += 14.0;
+                }
+                changelog::Block::Bullet(_) => {}
+            }
+        }
+        self.bullet_card(&bullets);
+    }
+
+    /// One card per run of bullets, one row per bullet, wrapped to the card width.
+    fn bullet_card(&mut self, bullets: &[&str]) {
+        if bullets.is_empty() {
+            return;
+        }
+        const PAD: f32 = 16.0;
+        const INDENT: f32 = 16.0;
+        let text_w = self.w - PAD * 2.0 - INDENT;
+        let gfx = self.cv.gfx;
+        let wrapped: Vec<Vec<String>> = bullets.iter().map(|b| changelog::wrap(b, text_w, |s| gfx.text_width(s, 13.0, 500))).collect();
+        let heights: Vec<f32> = wrapped.iter().map(|l| l.len() as f32 * NOTE_LINE + 20.0).collect();
+        let rows = self.card(&heights);
+        for (row, lines) in rows.iter().zip(&wrapped) {
+            let top = row.y + 10.0;
+            self.cv.fill_circle(row.x + PAD + 3.0, top + NOTE_LINE / 2.0, 2.5, DIM);
+            for (i, line) in lines.iter().enumerate() {
+                let lr = R::new(row.x + PAD + INDENT, top + i as f32 * NOTE_LINE, text_w, NOTE_LINE);
+                self.cv.text(line, lr, 13.0, 500, C::WHITE, Align::Left);
+            }
+        }
+    }
+
+    fn about(&mut self, cfg: &Config, update: &Status) {
         self.title("About");
         let r = self.card(&[150.0]);
         let row = r[0];
@@ -903,6 +977,23 @@ impl Ui<'_, '_> {
         self.label(r[0], "Made by", None);
         self.cv.text(DEVELOPER, R::new(r[0].right() - 216.0, r[0].y, 200.0, r[0].h), 13.0, 600, C::WHITE, Align::Right);
         self.button(r[1], "Support", Some(SUPPORT_EMAIL), "Email us", Act::Support, false);
+        self.section("Updates");
+        let r = self.card(&[ROW_SUB, ROW_SUB, 86.0]);
+        let current = env!("CARGO_PKG_VERSION");
+        self.button(r[1], "What's new", Some(&format!("Changes in version {current}")), "View changelog", Act::Link(CHANGELOG_PAGE), false);
+        let (label, sub, button) = match update {
+            Status::Idle => ("Updates".to_string(), format!("Version {current}"), Some(("Check now", Act::CheckUpdate))),
+            Status::Checking => ("Checking for updates…".to_string(), format!("Version {current}"), None),
+            Status::UpToDate => ("You're up to date".to_string(), format!("Version {current} is the latest"), Some(("Check again", Act::CheckUpdate))),
+            Status::Available(rel) => (format!("Version {} is available", rel.version), format!("You have {current}"), Some(("Install and restart", Act::InstallUpdate))),
+            Status::Downloading(v) => (format!("Installing {v}…"), "SuiNotch restarts by itself in a moment".to_string(), None),
+            Status::Failed(msg) => ("Couldn't update".to_string(), msg.clone(), Some(("Try again", Act::CheckUpdate))),
+        };
+        match button {
+            Some((text, act)) => self.button(r[0], &label, Some(&sub), text, act, false),
+            None => self.label(r[0], &label, Some(&sub)),
+        }
+        self.seg_row(cfg, r[2], "Automatic updates", Some("Automatic installs only while you're away from the PC"), &update::MODE_LABELS, |c| &mut c.update_mode);
         self.section("Your data");
         let r = self.card(&[ROW_SUB]);
         self.button(r[0], "Stored only on this PC", Some("Tasks, water log, shelf and settings. No accounts, no tracking"), "Open folder", Act::OpenData, false);

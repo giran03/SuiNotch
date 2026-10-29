@@ -139,6 +139,8 @@ pub enum Hit {
     ShelfClear,
     ShelfRemove,
     TodoCheck(u64),
+    /// The whole task row, under its controls, so moving between them keeps them visible.
+    TodoRow(u64),
     TodoTitle(u64),
     TodoColor(u64),
     TodoDue(u64),
@@ -977,6 +979,23 @@ fn on_event(app: &mut App, ev: Event) -> bool {
             }
             false
         }
+        Event::Update(status) => {
+            use crate::update::{Status, MODE_AUTO, MODE_OFF};
+            if let Status::Available(r) = &status {
+                let known = matches!(&app.update, Status::Available(old) if old.version == r.version);
+                if !known && app.cfg.update_mode != MODE_OFF {
+                    let text = if app.cfg.update_mode == MODE_AUTO {
+                        format!("SuiNotch {} installs when you're away", r.version)
+                    } else {
+                        format!("SuiNotch {} is available", r.version)
+                    };
+                    notice(app, &text);
+                }
+            }
+            app.update = status;
+            crate::settings::refresh(app);
+            false
+        }
     }
 }
 
@@ -1152,7 +1171,7 @@ fn on_wheel(app: &mut App, delta: i16, horizontal: bool) {
         return;
     }
     let steps = delta as f32 / 120.0;
-    let over_list = matches!(app.notch.hover, Some(Hit::ShelfItem(_) | Hit::TodoTitle(_) | Hit::TodoCheck(_) | Hit::TodoDue(_)));
+    let over_list = matches!(app.notch.hover, Some(Hit::ShelfItem(_) | Hit::TodoRow(_) | Hit::TodoTitle(_) | Hit::TodoDelete(_) | Hit::TodoCheck(_) | Hit::TodoDue(_)));
     if !horizontal && over_list && app.notch.page == Page::Todo && views::todo_overflow(app) > 0.0 {
         let max = views::todo_overflow(app);
         let t = (app.notch.todo_scroll.target - steps * 36.0).clamp(0.0, max);
