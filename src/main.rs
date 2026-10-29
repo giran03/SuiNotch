@@ -13,10 +13,12 @@ mod media;
 mod notch;
 mod pages;
 mod pomodoro;
+mod profile;
 mod settings;
 mod sound;
 mod store;
 mod sys;
+mod ticker;
 mod tray;
 mod views;
 
@@ -77,6 +79,7 @@ fn run() -> windows::core::Result<()> {
         art_color: None,
         lyrics: Vec::new(),
         lyrics_key: 0,
+        lyrics_requested: 0,
         pomo: pomodoro::Pomodoro::new(&durations),
         notch,
         settings: None,

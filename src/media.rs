@@ -18,6 +18,21 @@ use crate::events::{post, Event, MediaInfo};
 static MANAGER: OnceLock<Manager> = OnceLock::new();
 static SUBSCRIBED: Mutex<Option<(Session, [i64; 3])>> = Mutex::new(None);
 static LAST_ART_KEY: Mutex<u64> = Mutex::new(0);
+const ART_MAX_PX: u32 = 256;
+/// Timeline updates within this much of where playback should be are not worth a redraw.
+const POSITION_SLACK_MS: u64 = 1500;
+
+/// Title, artist, album and player of the current track, read only when the track changes.
+#[derive(Clone)]
+struct Track {
+    title: String,
+    artist: String,
+    album: String,
+    app_id: String,
+}
+
+static TRACK: Mutex<Option<Track>> = Mutex::new(None);
+static LAST_POSTED: Mutex<Option<(MediaInfo, std::time::Instant)>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug)]
 pub enum Command {
@@ -85,8 +100,24 @@ fn filetime_now() -> i64 {
     ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
 }
 
-fn snapshot(session: &Session) -> Result<MediaInfo> {
+fn track(session: &Session, reload: bool) -> Result<Track> {
+    let mut cached = TRACK.lock().unwrap_or_else(|e| e.into_inner());
+    if let (false, Some(t)) = (reload, cached.as_ref()) {
+        return Ok(t.clone());
+    }
     let props = session.TryGetMediaPropertiesAsync()?.get()?;
+    let t = Track {
+        title: props.Title()?.to_string(),
+        artist: props.Artist()?.to_string(),
+        album: props.AlbumTitle().map(|s| s.to_string()).unwrap_or_default(),
+        app_id: session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default(),
+    };
+    *cached = Some(t.clone());
+    Ok(t)
+}
+
+fn snapshot(session: &Session, reload: bool) -> Result<MediaInfo> {
+    let t = track(session, reload)?;
     let playback = session.GetPlaybackInfo()?;
     let timeline = session.GetTimelineProperties()?;
     let playing = playback.PlaybackStatus()? == Status::Playing;
@@ -101,10 +132,10 @@ fn snapshot(session: &Session) -> Result<MediaInfo> {
     }
     let position_ms = ((position / 10_000).max(0) as u64).min(duration_ms.max(1));
     Ok(MediaInfo {
-        title: props.Title()?.to_string(),
-        artist: props.Artist()?.to_string(),
-        album: props.AlbumTitle().map(|s| s.to_string()).unwrap_or_default(),
-        app_id: session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default(),
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        app_id: t.app_id,
         playing,
         position_ms,
         duration_ms,
@@ -128,21 +159,42 @@ fn refresh(with_art: bool) {
         post(Event::Media(None));
         return;
     };
-    match snapshot(&session) {
+    match snapshot(&session, with_art) {
         Ok(info) if !info.title.is_empty() => {
             let key = info.track_key();
-            post(Event::Media(Some(info)));
+            if worth_posting(&info) {
+                post(Event::Media(Some(info)));
+            }
             let mut last = LAST_ART_KEY.lock().unwrap_or_else(|e| e.into_inner());
             if with_art || *last != key {
                 *last = key;
                 drop(last);
                 // Some players publish the artwork a moment after the title.
                 let bytes = read_thumbnail(&session).ok().filter(|b| !b.is_empty());
-                post(Event::Artwork { key, bytes });
+                // Decode here, not on the UI thread, so a track change never stalls an animation.
+                let art = bytes.and_then(|b| crate::gfx::decode_art(&b, ART_MAX_PX));
+                post(Event::Artwork { key, art });
             }
         }
-        _ => post(Event::Media(None)),
+        _ => {
+            *LAST_POSTED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            post(Event::Media(None));
+        }
     }
+}
+
+/// Skips updates that only confirm where playback already is, so steady playback costs no redraws.
+fn worth_posting(info: &MediaInfo) -> bool {
+    let mut last = LAST_POSTED.lock().unwrap_or_else(|e| e.into_inner());
+    let unchanged = last.as_ref().is_some_and(|(prev, at)| {
+        let expected = prev.position_ms + if prev.playing { at.elapsed().as_millis() as u64 } else { 0 };
+        let same_track = MediaInfo { position_ms: 0, ..prev.clone() } == MediaInfo { position_ms: 0, ..info.clone() };
+        same_track && info.position_ms.abs_diff(expected) < POSITION_SLACK_MS
+    });
+    if !unchanged {
+        *last = Some((info.clone(), std::time::Instant::now()));
+    }
+    !unchanged
 }
 
 pub fn command(cmd: Command) {

@@ -29,6 +29,10 @@ use crate::views;
 pub const FLARE: f32 = 9.0;
 pub const SHADOW: f32 = 22.0;
 pub const PILL_SPACE: f32 = 40.0;
+/// Largest notch outline (the Calendar / lyrics pages), used to size the drawing buffer once.
+const MAX_NOTCH_W: f32 = 700.0;
+const MAX_NOTCH_H: f32 = 280.0;
+const MORPH_SPRINGS: usize = 5;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const T_FRAME: usize = 1;
@@ -36,6 +40,7 @@ const T_HOVER: usize = 2;
 const T_LEAVE: usize = 3;
 const T_SCHED: usize = 4;
 const T_IDLE: usize = 5;
+const T_DEMO: usize = 6;
 
 const LEAVE_DELAY_MS: u32 = 380;
 const ALERT_TIMEOUT: Duration = Duration::from_secs(25);
@@ -172,6 +177,7 @@ struct Surface {
     dc: HDC,
     bmp: HBITMAP,
     old: HGDIOBJ,
+    bits: *mut std::ffi::c_void,
     w: i32,
     h: i32,
 }
@@ -204,8 +210,33 @@ impl Surface {
             let mut bits = std::ptr::null_mut();
             let bmp = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
             let old = SelectObject(dc, bmp.into());
-            *self = Surface { dc, bmp, old, w, h };
+            *self = Surface { dc, bmp, old, bits, w, h };
         }
+    }
+
+    /// Writes the top-left `w` x `h` pixels as a PNG (profiling aid; premultiplied colours).
+    fn save_png(&self, gfx: &gfx::Gfx, path: &std::path::Path, w: i32, h: i32) -> Result<()> {
+        use windows::Win32::Graphics::Imaging::*;
+        let (w, h) = (w.min(self.w) as u32, h.min(self.h) as u32);
+        let stride = self.w as u32 * 4;
+        let pixels = unsafe { std::slice::from_raw_parts(self.bits as *const u8, (stride * h) as usize) };
+        unsafe {
+            let stream = gfx.wic.CreateStream()?;
+            stream.InitializeFromFilename(&windows::core::HSTRING::from(path.as_os_str()), 0x4000_0000 /* GENERIC_WRITE */)?;
+            let encoder = gfx.wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+            let mut frame = None;
+            encoder.CreateNewFrame(&mut frame, std::ptr::null_mut())?;
+            let frame = frame.ok_or_else(windows::core::Error::empty)?;
+            frame.Initialize(None)?;
+            frame.SetSize(w, h)?;
+            let mut format = GUID_WICPixelFormat32bppBGRA;
+            frame.SetPixelFormat(&mut format)?;
+            frame.WritePixels(h, stride, pixels)?;
+            frame.Commit()?;
+            encoder.Commit()?;
+        }
+        Ok(())
     }
 }
 
@@ -306,7 +337,7 @@ impl Notch {
         let today = Local::now().date_naive();
         Ok(Notch {
             hwnd,
-            surface: Surface { dc: HDC::default(), bmp: HBITMAP::default(), old: HGDIOBJ::default(), w: 0, h: 0 },
+            surface: Surface { dc: HDC::default(), bmp: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), w: 0, h: 0 },
             rt: None,
             scale: monitor_scale(cfg, &monitor),
             monitor,
@@ -373,6 +404,7 @@ impl Notch {
         Page::ALL.iter().copied().filter(|p| *p != Page::Calendar || cfg.calendar_page).collect()
     }
 
+    /// The first MORPH_SPRINGS change the notch outline or slide pages; the rest are small fades.
     fn springs(&mut self) -> [&mut Spring; 13] {
         [
             &mut self.w,
@@ -445,14 +477,14 @@ pub fn outline(cv: &Canvas, body: R, radius: f32) -> Option<windows::Win32::Grap
 
 // ------------------------------------------------------------------ frame
 
+/// Draws on the next vertical blank. Many requests within one refresh become one frame.
 pub fn request_frame(app: &mut App) {
     app.notch.last_frame = app.notch.last_frame.min(Instant::now());
-    unsafe {
-        SetTimer(Some(app.notch.hwnd), T_FRAME, 1, None);
-    }
+    crate::ticker::animate(true);
 }
 
 fn frame(app: &mut App) {
+    crate::profile::count("frame");
     let now = Instant::now();
     let dt = (now - app.notch.last_frame).as_secs_f32().min(0.05);
     app.notch.last_frame = now;
@@ -469,8 +501,11 @@ fn frame(app: &mut App) {
     update_pill(app);
 
     let mut moving = false;
-    for s in app.notch.springs() {
-        moving |= s.step(dt);
+    let mut morphing = false;
+    for (i, s) in app.notch.springs().into_iter().enumerate() {
+        let m = s.step(dt);
+        moving |= m;
+        morphing |= m && i < MORPH_SPRINGS;
     }
     let idle_s = sys::idle_seconds();
     let mascot_visible = mascot_visible(app);
@@ -482,20 +517,33 @@ fn frame(app: &mut App) {
         app.notch.eq_phase += dt;
     }
 
+    let mut cost = (0.0, 0.0);
     if !app.notch.hidden {
-        if let Err(e) = render(app) {
-            crate::log(&format!("render failed: {e}"));
-            app.notch.rt = None;
+        match render(app) {
+            Ok(c) => cost = c,
+            Err(e) => {
+                crate::log(&format!("render failed: {e}"));
+                app.notch.rt = None;
+            }
         }
     }
-
-    let next = if moving || app.notch.pressed.is_some() {
-        16
+    if moving {
+        crate::profile::record(dt * 1000.0, cost.0, cost.1);
     } else {
-        next_frame_ms(app, eq, mascot_visible)
-    };
+        crate::profile::end_burst();
+    }
+
+    // While moving, the vblank ticker drives frames; otherwise one timer waits for the next change.
+    // Shape changes get the full frame rate; small fades and drags are smooth enough at 60 fps.
+    let animating = moving || app.notch.pressed.is_some();
+    crate::ticker::animate(animating);
+    crate::ticker::set_fast(morphing);
     unsafe {
-        SetTimer(Some(app.notch.hwnd), T_FRAME, next as u32, None);
+        if animating {
+            let _ = KillTimer(Some(app.notch.hwnd), T_FRAME);
+        } else {
+            SetTimer(Some(app.notch.hwnd), T_FRAME, next_frame_ms(app, eq, mascot_visible) as u32, None);
+        }
     }
 }
 
@@ -601,7 +649,9 @@ fn update_pill(app: &mut App) {
     }
 }
 
-fn render(app: &mut App) -> Result<()> {
+/// Draws and presents one frame; returns (draw ms, present ms).
+fn render(app: &mut App) -> Result<(f32, f32)> {
+    let t0 = Instant::now();
     let n = &mut app.notch;
     let pill = n.pill_alpha.value > 0.01;
     let max_w = n.w.value.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW);
@@ -610,7 +660,10 @@ fn render(app: &mut App) -> Result<()> {
     n.win = (win_w, win_h);
     let scale = n.scale;
     let (pw, ph) = ((win_w * scale).ceil() as i32, (win_h * scale).ceil() as i32);
-    n.surface.ensure(pw, ph);
+    // Sized once for the largest state so growing never reallocates mid-animation.
+    let cap_w = ((MAX_NOTCH_W + 2.0 * (FLARE + SHADOW)) * scale).ceil() as i32;
+    let cap_h = ((MAX_NOTCH_H + SHADOW + PILL_SPACE) * scale).ceil() as i32;
+    n.surface.ensure(pw.max(cap_w), ph.max(cap_h));
     if n.rt.is_none() {
         n.rt = Some(gfx::dc_render_target(&app.gfx)?);
     }
@@ -632,8 +685,10 @@ fn render(app: &mut App) -> Result<()> {
         app.notch.rt = None;
         return Err(e);
     }
+    let t1 = Instant::now();
     present(app, pw, ph);
-    Ok(())
+    let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+    Ok((ms(t1 - t0), ms(t1.elapsed())))
 }
 
 fn present(app: &App, pw: i32, ph: i32) {
@@ -768,6 +823,7 @@ pub fn config_changed(app: &mut App, old: &Config) {
 pub fn relocate(app: &mut App) {
     if let Some(m) = sys::pick_monitor(app.cfg.display.as_deref()) {
         app.notch.scale = monitor_scale(&app.cfg, &m);
+        crate::ticker::set_monitor(&m.device);
         app.notch.monitor = m;
     }
     request_frame(app);
@@ -853,49 +909,59 @@ fn on_schedule(app: &mut App) {
 // ------------------------------------------------------------------ events from background threads
 
 pub fn drain_events(app: &mut App) {
+    let mut redraw = false;
     while let Ok(ev) = app.events.try_recv() {
-        on_event(app, ev);
+        crate::profile::count("event");
+        redraw |= on_event(app, ev);
     }
-    request_frame(app);
+    if redraw {
+        request_frame(app);
+    }
 }
 
-fn on_event(app: &mut App, ev: Event) {
+/// Applies one background event; returns true when the notch looks different afterwards.
+fn on_event(app: &mut App, ev: Event) -> bool {
     match ev {
         Event::Media(info) => {
             let Some(info) = info else {
                 app.media = None;
-                return;
+                return true;
             };
+            // One lookup per track, even if the player briefly reports nothing between songs.
             let key = info.track_key();
-            let changed = app.media.as_ref().map(|m| m.info.track_key()) != Some(key);
-            if changed {
+            if key != app.lyrics_requested {
+                app.lyrics_requested = key;
                 app.lyrics.clear();
                 app.lyrics_key = 0;
                 crate::lyrics::fetch(info.clone());
             }
             app.media = Some(app::Media { info, at: Instant::now() });
+            true
         }
-        Event::Artwork { key, bytes } => {
-            let decoded = bytes.and_then(|b| app.gfx.decode_image(&b)).and_then(|s| app.gfx.fit(&s, 256));
-            app.art_color = decoded.as_ref().and_then(|s| app.gfx.average_color(s));
-            app.artwork = decoded.map(|s| (key, s));
+        Event::Artwork { key, art } => {
+            app.art_color = art.as_ref().and_then(|a| a.color);
+            app.artwork = art.and_then(|a| app.gfx.bitmap_from_pixels(&a)).map(|s| (key, s));
             app.notch.art = None;
+            true
         }
         Event::Lyrics { key, lines } => {
             if app.media.as_ref().is_some_and(|m| m.info.track_key() == key) {
                 app.lyrics = lines;
                 app.lyrics_key = key;
             }
+            true
         }
         Event::Volume { level, muted } => {
             if app.cfg.hud_volume {
                 show_hud(app, Hud::Volume { level, muted });
             }
+            false
         }
         Event::AudioDeviceChanged => {
             if let Some(a) = app.audio.as_mut() {
                 a.rebind();
             }
+            false
         }
         Event::Network { connected, name } => {
             let state = (connected, name.clone());
@@ -903,11 +969,13 @@ fn on_event(app: &mut App, ev: Event) {
             if previous.is_some_and(|p| p != state) && app.cfg.hud_wifi {
                 show_hud(app, Hud::Wifi { connected, name });
             }
+            false
         }
         Event::Bluetooth { name, connected } => {
             if app.cfg.hud_headphones {
                 show_hud(app, Hud::Headphones { name, connected });
             }
+            false
         }
     }
 }
@@ -1254,6 +1322,7 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
                     }
                 }
                 T_SCHED => on_schedule(app),
+                T_DEMO => demo_step(app),
                 T_IDLE => on_idle_check(app),
                 id => timer_hook(app, id),
             }
@@ -1307,6 +1376,11 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
             relocate(app);
             None
+        }
+        events::WM_APP_FRAME => {
+            crate::ticker::frame_taken();
+            frame(app);
+            Some(LRESULT(0))
         }
         events::WM_APP_EVENT => {
             drain_events(app);
@@ -1373,6 +1447,7 @@ fn on_idle_check(app: &mut App) {
 
 pub fn start(app: &mut App) {
     events::set_target(app.notch.hwnd);
+    crate::ticker::start(&app.notch.monitor.device);
     sys::register_power(app.notch.hwnd);
     app.caps = sys::caps_lock_on();
     app.language = sys::keyboard_language();
@@ -1387,6 +1462,9 @@ pub fn start(app: &mut App) {
     // No reminder the instant the app starts; the first one waits a few minutes.
     let grace = store::now() + STARTUP_GRACE_S;
     app.water.snoozed_until = Some(app.water.snoozed_until.map_or(grace, |s| s.max(grace)));
+    if crate::profile::demo() {
+        unsafe { SetTimer(Some(app.notch.hwnd), T_DEMO, crate::profile::DEMO_INTERVAL_MS, None) };
+    }
     check_fullscreen(app);
     schedule(app);
     request_frame(app);
@@ -1405,4 +1483,32 @@ pub fn today() -> NaiveDate {
 
 pub fn hour_now() -> u32 {
     Local::now().hour()
+}
+
+/// Profiling demo: open and close the notch on a fixed rhythm, then quit.
+fn demo_step(app: &mut App) {
+    thread_local! {
+        static TOGGLES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let n = TOGGLES.with(|t| {
+        t.set(t.get() + 1);
+        t.get()
+    });
+    if n > crate::profile::DEMO_TOGGLES {
+        app::defer(Deferred::Exit);
+        return;
+    }
+    if app.notch.expanded {
+        if let Some(dir) = std::env::var_os("SUINOTCH_PROFILE_DUMP") {
+            let (pw, ph) = ((app.notch.win.0 * app.notch.scale).ceil() as i32, (app.notch.win.1 * app.notch.scale).ceil() as i32);
+            let path = std::path::Path::new(&dir).join(format!("notch-{n:02}.png"));
+            if let Err(e) = app.notch.surface.save_png(&app.gfx, &path, pw, ph) {
+                crate::log(&format!("dump failed: {e}"));
+            }
+        }
+        collapse(app);
+    } else {
+        app.notch.alert = None;
+        expand(app);
+    }
 }

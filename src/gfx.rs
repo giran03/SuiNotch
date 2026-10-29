@@ -14,6 +14,8 @@ use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows_numerics::{Matrix3x2, Vector2};
 
+const MEASURE_CACHE_LIMIT: usize = 512;
+
 pub const ICON_FONT_FLUENT: PCWSTR = w!("Segoe Fluent Icons");
 pub const ICON_FONT_MDL2: PCWSTR = w!("Segoe MDL2 Assets");
 
@@ -161,6 +163,7 @@ pub struct Gfx {
     text_font: PCWSTR,
     display_font: PCWSTR,
     formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
+    measured: RefCell<HashMap<(String, Font, u32, i32), (f32, f32)>>,
 }
 
 impl Gfx {
@@ -183,7 +186,7 @@ impl Gfx {
             let text_font = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
             let display_font =
                 if has(w!("Segoe UI Variable Display")) { w!("Segoe UI Variable Display") } else { w!("Segoe UI") };
-            Ok(Gfx { d2d, dw, wic, icon_font, text_font, display_font, formats: RefCell::new(HashMap::new()) })
+            Ok(Gfx { d2d, dw, wic, icon_font, text_font, display_font, formats: RefCell::new(HashMap::new()), measured: RefCell::new(HashMap::new()) })
         }
     }
 
@@ -230,7 +233,22 @@ impl Gfx {
         self.measure(s, Font::Text, size, weight).0
     }
 
+    /// Text extent, cached: buttons and lyric lines are measured on every animation frame.
     pub fn measure(&self, s: &str, font: Font, size: f32, weight: i32) -> (f32, f32) {
+        let key = (s.to_string(), font, (size * 10.0) as u32, weight);
+        if let Some(m) = self.measured.borrow().get(&key) {
+            return *m;
+        }
+        let m = self.measure_uncached(s, font, size, weight);
+        let mut cache = self.measured.borrow_mut();
+        if cache.len() >= MEASURE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, m);
+        m
+    }
+
+    fn measure_uncached(&self, s: &str, font: Font, size: f32, weight: i32) -> (f32, f32) {
         let Some(f) = self.format(font, size, weight, Align::Left, false) else { return (0.0, 0.0) };
         let wide: Vec<u16> = s.encode_utf16().collect();
         unsafe {
@@ -243,30 +261,60 @@ impl Gfx {
         }
     }
 
-    /// Decodes an encoded image (PNG/JPEG/...) into a premultiplied BGRA WIC bitmap.
     pub fn decode_image(&self, bytes: &[u8]) -> Option<IWICBitmapSource> {
-        unsafe {
-            let stream = self.wic.CreateStream().ok()?;
-            stream.InitializeFromMemory(bytes).ok()?;
-            let decoder = self.wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad).ok()?;
-            let frame = decoder.GetFrame(0).ok()?;
-            self.to_pbgra(&frame.cast().ok()?)
-        }
+        image::decode(&self.wic, bytes)
     }
 
     pub fn to_pbgra(&self, source: &IWICBitmapSource) -> Option<IWICBitmapSource> {
+        image::to_pbgra(&self.wic, source)
+    }
+
+    pub fn fit(&self, source: &IWICBitmapSource, max_px: u32) -> Option<IWICBitmapSource> {
+        image::fit(&self.wic, source, max_px)
+    }
+
+    /// Wraps pixels prepared off the UI thread (see `decode_art`) as a WIC bitmap; no decoding.
+    pub fn bitmap_from_pixels(&self, art: &ArtPixels) -> Option<IWICBitmapSource> {
         unsafe {
-            let conv = self.wic.CreateFormatConverter().ok()?;
+            let bmp = self
+                .wic
+                .CreateBitmapFromMemory(art.w, art.h, &GUID_WICPixelFormat32bppPBGRA, art.w * 4, &art.pbgra)
+                .ok()?;
+            bmp.cast().ok()
+        }
+    }
+}
+
+/// Image helpers usable from any thread that has COM initialised.
+pub mod image {
+    use super::C;
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Imaging::*;
+
+    /// Decodes an encoded image (PNG/JPEG/...) into a premultiplied BGRA WIC bitmap.
+    pub fn decode(wic: &IWICImagingFactory, bytes: &[u8]) -> Option<IWICBitmapSource> {
+        unsafe {
+            let stream = wic.CreateStream().ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
+            let decoder = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad).ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            to_pbgra(wic, &frame.cast().ok()?)
+        }
+    }
+
+    pub fn to_pbgra(wic: &IWICImagingFactory, source: &IWICBitmapSource) -> Option<IWICBitmapSource> {
+        unsafe {
+            let conv = wic.CreateFormatConverter().ok()?;
             conv.Initialize(source, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut)
                 .ok()?;
             // Materialize so the bitmap no longer depends on the decoder's stream.
-            let bmp = self.wic.CreateBitmapFromSource(&conv, WICBitmapCacheOnLoad).ok()?;
+            let bmp = wic.CreateBitmapFromSource(&conv, WICBitmapCacheOnLoad).ok()?;
             bmp.cast().ok()
         }
     }
 
     /// Scales a WIC bitmap so its longest side is at most `max_px`.
-    pub fn fit(&self, source: &IWICBitmapSource, max_px: u32) -> Option<IWICBitmapSource> {
+    pub fn fit(wic: &IWICImagingFactory, source: &IWICBitmapSource, max_px: u32) -> Option<IWICBitmapSource> {
         unsafe {
             let (mut w, mut h) = (0, 0);
             source.GetSize(&mut w, &mut h).ok()?;
@@ -274,18 +322,18 @@ impl Gfx {
                 return Some(source.clone());
             }
             let s = max_px as f32 / w.max(h) as f32;
-            let scaler = self.wic.CreateBitmapScaler().ok()?;
+            let scaler = wic.CreateBitmapScaler().ok()?;
             scaler
                 .Initialize(source, ((w as f32 * s) as u32).max(1), ((h as f32 * s) as u32).max(1), WICBitmapInterpolationModeFant)
                 .ok()?;
-            let bmp = self.wic.CreateBitmapFromSource(&scaler, WICBitmapCacheOnLoad).ok()?;
+            let bmp = wic.CreateBitmapFromSource(&scaler, WICBitmapCacheOnLoad).ok()?;
             bmp.cast().ok()
         }
     }
 
     /// Average colour of a bitmap, nudged brighter so it reads as a glow on black.
-    pub fn average_color(&self, source: &IWICBitmapSource) -> Option<C> {
-        let small = self.fit(source, 16)?;
+    pub fn average_color(wic: &IWICImagingFactory, source: &IWICBitmapSource) -> Option<C> {
+        let small = fit(wic, source, 16)?;
         unsafe {
             let (mut w, mut h) = (0, 0);
             small.GetSize(&mut w, &mut h).ok()?;
@@ -312,6 +360,37 @@ impl Gfx {
             Some(C((c.0 * boost).min(1.0), (c.1 * boost).min(1.0), (c.2 * boost).min(1.0), 1.0))
         }
     }
+}
+
+/// Album art decoded, scaled and colour-sampled off the UI thread.
+#[derive(Debug)]
+pub struct ArtPixels {
+    pub w: u32,
+    pub h: u32,
+    pub pbgra: Vec<u8>,
+    pub color: Option<C>,
+}
+
+/// Decodes artwork bytes on the calling (background) thread with its own WIC factory.
+pub fn decode_art(bytes: &[u8], max_px: u32) -> Option<ArtPixels> {
+    thread_local! {
+        static WIC: Option<IWICImagingFactory> = unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()
+        };
+    }
+    WIC.with(|wic| {
+        let wic = wic.as_ref()?;
+        let source = image::fit(wic, &image::decode(wic, bytes)?, max_px)?;
+        let color = image::average_color(wic, &source);
+        let (mut w, mut h) = (0, 0);
+        unsafe {
+            source.GetSize(&mut w, &mut h).ok()?;
+            let mut pbgra = vec![0u8; (w * h * 4) as usize];
+            source.CopyPixels(std::ptr::null(), w * 4, &mut pbgra).ok()?;
+            Some(ArtPixels { w, h, pbgra, color })
+        }
+    })
 }
 
 /// A frame being drawn. Coordinates are in DIPs; the render target applies the DPI.
@@ -424,6 +503,28 @@ impl<'a> Canvas<'a> {
         unsafe { self.rt.FillGeometry(path, self.paint(c), None) }
     }
 
+    /// Fills `path` with a soft radial glow fading from `c` at (cx, cy) to transparent at `radius`.
+    /// The shape itself does the clipping, so no layer is needed.
+    pub fn fill_path_glow(&self, path: &ID2D1PathGeometry, cx: f32, cy: f32, radius: f32, c: C) {
+        let alpha = self.opacity_stack.last().copied().unwrap_or(1.0);
+        let stops = [
+            D2D1_GRADIENT_STOP { position: 0.0, color: c.a(alpha).d2d() },
+            D2D1_GRADIENT_STOP { position: 0.55, color: c.a(alpha * 0.45).d2d() },
+            D2D1_GRADIENT_STOP { position: 1.0, color: c.a(0.0).d2d() },
+        ];
+        unsafe {
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                center: Vector2::new(cx, cy),
+                gradientOriginOffset: Vector2::new(0.0, 0.0),
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let Ok(brush) = self.rt.CreateRadialGradientBrush(&props, None, &coll) else { return };
+            self.rt.FillGeometry(path, &brush, None);
+        }
+    }
+
     pub fn stroke_path(&self, path: &ID2D1PathGeometry, c: C, width: f32) {
         unsafe { self.rt.DrawGeometry(path, self.paint(c), width, &self.round_cap()) }
     }
@@ -503,7 +604,15 @@ impl<'a> Canvas<'a> {
         let parent = self.opacity_stack.last().copied().unwrap_or(1.0);
         self.opacity_stack.push(parent * opacity.clamp(0.0, 1.0));
         // Pair with pop(); no D2D layer needed for plain opacity.
-        self.layer_kinds_push(false);
+        self.layer_kinds_push(Pushed::Opacity);
+    }
+
+    /// Rectangular clip: far cheaper than a geometry layer, especially in software rendering.
+    pub fn push_clip_rect(&mut self, r: R) {
+        unsafe { self.rt.PushAxisAlignedClip(&r.d2d(), D2D1_ANTIALIAS_MODE_ALIASED) };
+        let parent = self.opacity_stack.last().copied().unwrap_or(1.0);
+        self.opacity_stack.push(parent);
+        self.layer_kinds_push(Pushed::Clip);
     }
 
     fn push_layer(&mut self, geo: Option<ID2D1Geometry>, opacity: f32) {
@@ -523,11 +632,11 @@ impl<'a> Canvas<'a> {
         unsafe { ManuallyDrop::drop(&mut params.geometricMask) };
         let parent = self.opacity_stack.last().copied().unwrap_or(1.0);
         self.opacity_stack.push(parent * opacity.clamp(0.0, 1.0));
-        self.layer_kinds_push(true);
+        self.layer_kinds_push(Pushed::Layer);
     }
 
-    fn layer_kinds_push(&mut self, is_layer: bool) {
-        LAYER_KINDS.with(|k| k.borrow_mut().push(is_layer));
+    fn layer_kinds_push(&mut self, kind: Pushed) {
+        LAYER_KINDS.with(|k| k.borrow_mut().push(kind));
     }
 
     pub fn pop(&mut self) {
@@ -535,9 +644,10 @@ impl<'a> Canvas<'a> {
         if self.opacity_stack.is_empty() {
             self.opacity_stack.push(1.0);
         }
-        let was_layer = LAYER_KINDS.with(|k| k.borrow_mut().pop()).unwrap_or(false);
-        if was_layer {
-            unsafe { self.rt.PopLayer() };
+        match LAYER_KINDS.with(|k| k.borrow_mut().pop()) {
+            Some(Pushed::Layer) => unsafe { self.rt.PopLayer() },
+            Some(Pushed::Clip) => unsafe { self.rt.PopAxisAlignedClip() },
+            _ => {}
         }
     }
 
@@ -562,8 +672,16 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// What each push_* call did, so pop() undoes the right thing.
+#[derive(Clone, Copy)]
+enum Pushed {
+    Opacity,
+    Layer,
+    Clip,
+}
+
 thread_local! {
-    static LAYER_KINDS: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    static LAYER_KINDS: RefCell<Vec<Pushed>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct PathBuilder {
@@ -629,7 +747,7 @@ impl PathBuilder {
 
 pub fn dc_render_target(gfx: &Gfx) -> Result<ID2D1DCRenderTarget> {
     let props = D2D1_RENDER_TARGET_PROPERTIES {
-        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: 96.0,
         dpiY: 96.0,

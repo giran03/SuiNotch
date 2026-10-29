@@ -102,20 +102,19 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
     if app.cfg.glass {
         cv.stroke_path(&path, C::WHITE.a(0.09), 1.0);
     }
-    cv.push_clip_path(&path, 1.0);
     let music_visible = open < 0.5 || app.notch.page == Page::Music;
     if app.cfg.artwork_glow && app.media.is_some() && !raised && music_visible {
         if let Some(col) = app.art_color {
             // A soft halo centred behind the cover, closed or open.
             let gx = crate::anim::lerp(body.x + 22.0, body.x + 74.0, open);
             let gy = crate::anim::lerp(body.h * 0.5, 92.0, open);
-            let base = crate::anim::lerp(18.0, 86.0, open);
-            for k in 0..6 {
-                let r = base * (1.0 + k as f32 * 0.22);
-                cv.fill_circle(gx, gy, r, col.a(0.028));
-            }
+            let radius = crate::anim::lerp(40.0, 190.0, open);
+            cv.fill_path_glow(&path, gx, gy, radius, col.a(0.16));
         }
     }
+    // Content sits well inside the rounded corners, so a rectangle clip is enough and far cheaper
+    // than clipping to the outline.
+    cv.push_clip_rect(body);
     hit(app, body, Hit::Body);
     if app.notch.alert.is_some() {
         draw_alert(cv, app, body);

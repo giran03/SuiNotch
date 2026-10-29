@@ -2,8 +2,9 @@
 //! target changes mid-flight, which is what makes the notch feel fluid instead of tweened.
 
 const STEP: f32 = 1.0 / 240.0;
-const REST_DELTA: f32 = 0.01;
-const REST_SPEED: f32 = 0.05;
+// Close enough to be invisible: a few hundredths of a pixel, or of an opacity step.
+const REST_DELTA: f32 = 0.03;
+const REST_SPEED: f32 = 0.3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {

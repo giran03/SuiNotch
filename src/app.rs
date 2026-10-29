@@ -49,6 +49,8 @@ pub struct App {
     pub art_color: Option<C>,
     pub lyrics: Vec<Line>,
     pub lyrics_key: u64,
+    /// Track whose lyrics were last requested, so each song is looked up once.
+    pub lyrics_requested: u64,
     pub pomo: Pomodoro,
     pub notch: Notch,
     pub settings: Option<SettingsWindow>,

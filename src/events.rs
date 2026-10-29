@@ -16,6 +16,8 @@ pub const WM_APP_LANG: u32 = WM_APP + 4;
 pub const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 /// Sent by a second launch of the exe: the running copy opens Settings.
 pub const WM_APP_SHOW_SETTINGS: u32 = WM_APP + 6;
+/// One per vertical blank while the notch animates (see ticker.rs).
+pub const WM_APP_FRAME: u32 = WM_APP + 7;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaInfo {
@@ -41,7 +43,7 @@ impl MediaInfo {
 #[derive(Debug)]
 pub enum Event {
     Media(Option<MediaInfo>),
-    Artwork { key: u64, bytes: Option<Vec<u8>> },
+    Artwork { key: u64, art: Option<crate::gfx::ArtPixels> },
     Lyrics { key: u64, lines: Vec<Line> },
     Volume { level: f32, muted: bool },
     AudioDeviceChanged,
