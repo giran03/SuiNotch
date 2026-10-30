@@ -47,6 +47,10 @@ pub struct Config {
     /// Use the accent colour chosen in Windows instead of one of ours.
     pub accent_follow_system: bool,
     pub roundness: usize,
+    /// Index into `NOTCH_STYLE_LABELS`: docked, floating or flat.
+    pub notch_style: usize,
+    /// Space in pixels between the screen edge and a floating notch.
+    pub notch_gap: u32,
     pub animation: usize,
     pub shadow: bool,
     pub artwork_glow: bool,
@@ -134,6 +138,8 @@ impl Default for Config {
             accent: 0,
             accent_follow_system: false,
             roundness: 1,
+            notch_style: 0,
+            notch_gap: DEFAULT_NOTCH_GAP,
             animation: 1,
             shadow: true,
             artwork_glow: true,
@@ -188,6 +194,22 @@ impl Default for Config {
     }
 }
 
+pub const NOTCH_STYLE_LABELS: [&str; 3] = ["Docked", "Floating", "Flat"];
+pub const MIN_NOTCH_GAP: u32 = 4;
+pub const MAX_NOTCH_GAP: u32 = 24;
+pub const DEFAULT_NOTCH_GAP: u32 = 8;
+
+/// How the notch meets the top edge of the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotchStyle {
+    /// Concave shoulders blend into the screen edge.
+    Docked,
+    /// A detached capsule with a gap above it.
+    Floating,
+    /// Flush with the edge, with square top corners and no shoulders.
+    Flat,
+}
+
 pub const HOVER_DELAYS_MS: [u32; 3] = [0, 150, 400];
 pub const HOVER_DELAY_LABELS: [&str; 3] = ["Instant", "Short", "Relaxed"];
 pub const ROUNDNESS: [f32; 3] = [0.6, 1.0, 1.45];
@@ -216,6 +238,21 @@ impl Config {
     }
     pub fn roundness(&self) -> f32 {
         ROUNDNESS[self.roundness.min(2)]
+    }
+    pub fn style(&self) -> NotchStyle {
+        match self.notch_style {
+            1 => NotchStyle::Floating,
+            2 => NotchStyle::Flat,
+            _ => NotchStyle::Docked,
+        }
+    }
+    /// Pixels between the screen edge and the notch; zero unless it floats.
+    pub fn gap_px(&self) -> f32 {
+        if self.style() == NotchStyle::Floating {
+            self.notch_gap.clamp(MIN_NOTCH_GAP, MAX_NOTCH_GAP) as f32
+        } else {
+            0.0
+        }
     }
     pub fn animation(&self) -> (f32, f32) {
         ANIMATION[self.animation.min(2)]
@@ -252,6 +289,8 @@ impl Config {
         self.long_break_min = self.long_break_min.clamp(5, 60);
         self.sessions_before_long = self.sessions_before_long.clamp(2, 8);
         self.focus_mode = self.focus_mode.min(2);
+        self.notch_style = self.notch_style.min(NOTCH_STYLE_LABELS.len() - 1);
+        self.notch_gap = self.notch_gap.clamp(MIN_NOTCH_GAP, MAX_NOTCH_GAP);
         self.timer_min = self.timer_min.clamp(1, crate::timers::MAX_MIN);
         self.clipboard_limit = self.clipboard_limit.clamp(crate::clips::MIN_LIMIT, crate::clips::MAX_LIMIT);
         self.clipboard_keep = self.clipboard_keep.min(crate::clips::KEEP_MIN.len() - 1);
@@ -352,6 +391,32 @@ mod tests {
         assert_eq!(c.focus_min, 5);
         assert_eq!(c.goal_ml, 6000);
         assert_eq!(c.water_end_hour, 23);
+    }
+
+    #[test]
+    fn old_settings_keep_the_docked_notch() {
+        let c: Config = serde_json::from_str(r#"{"roundness": 2}"#).unwrap();
+        assert_eq!(c.style(), NotchStyle::Docked);
+        assert_eq!(c.gap_px(), 0.0);
+    }
+
+    #[test]
+    fn only_the_floating_style_leaves_a_gap() {
+        let floating = Config { notch_style: 1, notch_gap: 12, ..Config::default() };
+        assert_eq!(floating.style(), NotchStyle::Floating);
+        assert_eq!(floating.gap_px(), 12.0);
+        let flat = Config { notch_style: 2, notch_gap: 12, ..Config::default() };
+        assert_eq!(flat.style(), NotchStyle::Flat);
+        assert_eq!(flat.gap_px(), 0.0);
+    }
+
+    #[test]
+    fn sanitize_clamps_notch_style_and_gap() {
+        let c = Config { notch_style: 9, notch_gap: 500, ..Config::default() }.sanitized();
+        assert_eq!(c.notch_style, 2);
+        assert_eq!(c.notch_gap, MAX_NOTCH_GAP);
+        let c = Config { notch_gap: 0, ..Config::default() }.sanitized();
+        assert_eq!(c.notch_gap, MIN_NOTCH_GAP);
     }
 
     #[test]

@@ -92,6 +92,7 @@ pub(super) fn frame(app: &mut App) {
     n.w.set(tw);
     n.h.set(th);
     n.radius.set(tr);
+    n.gap.set(app.cfg.gap_px());
     n.open.set(if (n.expanded || n.drag_over) && n.alert.is_none() && n.hud.is_none() { 1.0 } else { 0.0 });
     let shown = app.notch.shown_page();
     let idx = visible_pages(app).iter().position(|p| *p == shown).unwrap_or(0) as f32;
@@ -276,13 +277,14 @@ pub(super) fn render(app: &mut App) -> Result<(f32, f32)> {
     let pill = n.pill_alpha.value > 0.01;
     let max_w = n.w.value.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW);
     let win_w = max_w.ceil();
-    let win_h = (n.h.value + SHADOW + if pill { PILL_SPACE } else { 0.0 }).ceil().max(8.0);
+    let gap = n.gap.value.max(0.0);
+    let win_h = (gap + n.h.value + SHADOW + if pill { PILL_SPACE } else { 0.0 }).ceil().max(8.0);
     n.win = (win_w, win_h);
     let scale = n.scale;
     let (pw, ph) = ((win_w * scale).ceil() as i32, (win_h * scale).ceil() as i32);
     // Sized once for the largest state so growing never reallocates mid-animation.
     let cap_w = ((MAX_NOTCH_W + 2.0 * (FLARE + SHADOW)) * scale).ceil() as i32;
-    let cap_h = ((MAX_NOTCH_H + SHADOW + PILL_SPACE) * scale).ceil() as i32;
+    let cap_h = ((MAX_NOTCH_H + crate::config::MAX_NOTCH_GAP as f32 + SHADOW + PILL_SPACE) * scale).ceil() as i32;
     n.surface.ensure(pw.max(cap_w), ph.max(cap_h));
     if n.rt.is_none() {
         n.rt = Some(gfx::dc_render_target(&app.gfx)?);
@@ -299,6 +301,8 @@ pub(super) fn render(app: &mut App) -> Result<(f32, f32)> {
     let mut cv = Canvas::new(&gfx, target)?;
     cv.clear(C::CLEAR);
     app.notch.hits.clear();
+    // Everything is drawn from the notch's own top-left; the gap above a floating notch shifts it down.
+    cv.translate(0.0, gap);
     views::draw_notch(&mut cv, app);
     let end = unsafe { rt.EndDraw(None, None) };
     if let Err(e) = end {

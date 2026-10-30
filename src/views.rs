@@ -89,14 +89,23 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
     let open = app.notch.open.value.clamp(0.0, 1.0);
     let radius = app.notch.radius.value;
     let raised = app.notch.alert.is_some() || app.notch.hud.is_some();
+    let style = app.cfg.style();
+    // A floating notch gets its shadow all round; the others hide its top edge off screen.
+    let shadow_top = if style == crate::config::NotchStyle::Floating { -2.0 } else { -20.0 };
     if app.cfg.shadow && (open > 0.02 || raised) {
         let a = if raised { 0.7 } else { open };
         for i in 1..=7 {
             let g = i as f32 * 2.6;
-            cv.fill_rrect(R::new(body.x - g * 0.5, -20.0, body.w + g, body.h + 20.0 + g * 0.9), radius + g, C::BLACK.a(a * 0.045));
+            cv.fill_rrect(R::new(body.x - g * 0.5, shadow_top, body.w + g, body.h - shadow_top + g * 0.9), radius + g, C::BLACK.a(a * 0.045));
         }
     }
-    let Some(path) = notch::outline(cv, body, radius) else { return };
+    if app.notch.gap.value > 0.5 {
+        // Nearly invisible, but not fully transparent: it keeps the screen edge above a floating
+        // notch hoverable.
+        let gap = app.notch.gap.value;
+        cv.fill_rect(R::new(body.x - notch::FLARE, -gap, body.w + 2.0 * notch::FLARE, gap + 1.0), C::BLACK.a(0.006));
+    }
+    let Some(path) = notch::outline(cv, body, radius, style) else { return };
     let fill = if app.cfg.glass { C(0.05, 0.055, 0.07, 0.88) } else { C::BLACK };
     cv.fill_path(&path, fill);
     if app.cfg.glass {

@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::anim::Spring;
 use crate::app::{self, App, Deferred};
-use crate::config::Config;
+use crate::config::{Config, NotchStyle};
 use crate::events::{self, Event};
 use crate::gfx::{self, Canvas, C, R};
 use crate::mascot::Mascot;
@@ -42,7 +42,7 @@ pub const PILL_SPACE: f32 = 40.0;
 /// Largest notch outline (the Calendar / lyrics pages), used to size the drawing buffer once.
 const MAX_NOTCH_W: f32 = 700.0;
 const MAX_NOTCH_H: f32 = 280.0;
-const MORPH_SPRINGS: usize = 5;
+const MORPH_SPRINGS: usize = 6;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const T_FRAME: usize = 1;
@@ -69,6 +69,8 @@ pub struct Notch {
     pub open: Spring,
     pub page: Page,
     pub page_pos: Spring,
+    /// Space between the screen edge and the notch; only a floating notch has any.
+    pub gap: Spring,
     pub pill_w: Spring,
     pub pill_alpha: Spring,
     pub pill_line: Option<usize>,
@@ -167,6 +169,7 @@ impl Notch {
             open: Spring::new(0.0, anim_r * 0.9, 1.0),
             page: Notch::pages(cfg).first().copied().unwrap_or(Page::Music),
             page_pos: Spring::new(0.0, 0.42, 0.88),
+            gap: Spring::new(cfg.gap_px(), anim_r, 1.0),
             pill_w: Spring::new(0.0, 0.42, 0.8),
             pill_alpha: Spring::new(0.0, 0.3, 1.0),
             pill_line: None,
@@ -236,13 +239,14 @@ impl Notch {
     }
 
     /// The first MORPH_SPRINGS change the notch outline or slide pages; the rest are small fades.
-    fn springs(&mut self) -> [&mut Spring; 14] {
+    fn springs(&mut self) -> [&mut Spring; 15] {
         [
             &mut self.w,
             &mut self.h,
             &mut self.radius,
             &mut self.open,
             &mut self.page_pos,
+            &mut self.gap,
             &mut self.pill_w,
             &mut self.pill_alpha,
             &mut self.line_fade,
@@ -291,8 +295,12 @@ fn target_shape(app: &App) -> (f32, f32, f32) {
     (w, h, (r * round).min(h / 2.0))
 }
 
-/// Notch outline with concave shoulders blending into the top screen edge.
-pub fn outline(cv: &Canvas, body: R, radius: f32) -> Option<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry> {
+/// Notch outline. Docked has concave shoulders blending into the top screen edge; Floating
+/// rounds the top corners as well; Flat keeps them square.
+pub fn outline(cv: &Canvas, body: R, radius: f32, style: NotchStyle) -> Option<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry> {
+    if style != NotchStyle::Docked {
+        return plain_outline(cv, body, radius, style == NotchStyle::Floating);
+    }
     let f = FLARE.min(body.h * 0.8).max(0.5);
     let r = radius.min(body.h - f * 0.5).max(0.5);
     let (x0, x1, y1) = (body.x, body.right(), body.bottom());
@@ -305,6 +313,24 @@ pub fn outline(cv: &Canvas, body: R, radius: f32) -> Option<windows::Win32::Grap
         .arc_to(x1, y1 - r, r, false)
         .line_to(x1, f)
         .quad(x1, 0.0, x1 + f, 0.0);
+    Some(p.finish(true))
+}
+
+/// A rounded body without shoulders; `round_top` rounds the top corners to match the bottom ones.
+fn plain_outline(cv: &Canvas, body: R, radius: f32, round_top: bool) -> Option<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry> {
+    let r = radius.min(body.h / 2.0).max(0.5);
+    let top = if round_top { r } else { 0.0 };
+    let (x0, x1, y0, y1) = (body.x, body.right(), body.y, body.bottom());
+    let mut p = cv.path()?;
+    p.move_to(x0, y0 + top)
+        .line_to(x0, y1 - r)
+        .arc_to(x0 + r, y1, r, false)
+        .line_to(x1 - r, y1)
+        .arc_to(x1, y1 - r, r, false)
+        .line_to(x1, y0 + top);
+    if round_top {
+        p.arc_to(x1 - top, y0, top, false).line_to(x0 + top, y0).arc_to(x0, y0 + top, top, false);
+    }
     Some(p.finish(true))
 }
 
@@ -410,6 +436,7 @@ pub fn config_changed(app: &mut App, old: &Config) {
         s.tune(r, z);
     }
     app.notch.radius.tune(r, z.max(0.9));
+    app.notch.gap.tune(r, 1.0);
     app.notch.open.tune(r * 0.9, 1.0);
     if old.display != app.cfg.display || old.size != app.cfg.size || old.display_follow != app.cfg.display_follow {
         relocate(app);
@@ -529,7 +556,7 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
-            let (x, y) = point(lparam, scale);
+            let (x, y) = point(lparam, scale, app.notch.gap.value);
             on_mouse_move(app, x, y);
             Some(LRESULT(0))
         }
@@ -540,12 +567,12 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
-            let (x, y) = point(lparam, scale);
+            let (x, y) = point(lparam, scale, app.notch.gap.value);
             on_button_down(app, x, y);
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
-            let (x, y) = point(lparam, scale);
+            let (x, y) = point(lparam, scale, app.notch.gap.value);
             on_button_up(app, x, y);
             Some(LRESULT(0))
         }

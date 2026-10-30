@@ -136,6 +136,10 @@ impl Ui<'_, '_> {
             None => "Windows' accent colour couldn't be read, so your pick above is used",
         };
         self.toggle(c, r[1], "Use the Windows accent colour", Some(sub), |c| &mut c.accent_follow_system);
+        self.section("Style");
+        let r = self.card(&[ROW_SEG, ROW_SUB]);
+        self.seg_row(c, r[0], "Notch style", Some("Docked blends into the screen edge, Floating hovers below it, Flat sits square against it"), &config::NOTCH_STYLE_LABELS, |c| &mut c.notch_style);
+        self.stepper(c, r[1], "Floating gap", Some("Space between the screen edge and a floating notch"), |c| &mut c.notch_gap, 2, config::MIN_NOTCH_GAP, config::MAX_NOTCH_GAP, &|v| format!("{v} px"));
         self.section("Shape");
         let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB]);
         self.seg_row(c, r[0], "Corner roundness", Some("How soft the bottom corners of the notch are"), &config::ROUNDNESS_LABELS, |c| &mut c.roundness);

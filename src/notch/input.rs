@@ -2,15 +2,18 @@
 
 use super::*;
 
-pub(super) fn point(lparam: LPARAM, scale: f32) -> (f32, f32) {
+/// A mouse position in the notch's own space: the window point minus the gap above a floating notch.
+pub(super) fn point(lparam: LPARAM, scale: f32, gap: f32) -> (f32, f32) {
     let x = (lparam.0 & 0xffff) as i16 as f32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
-    (x / scale, y / scale)
+    (x / scale, y / scale - gap)
 }
 
 pub(super) fn inside_body(app: &App, x: f32, y: f32) -> bool {
     let b = app.notch.body();
-    R::new(b.x - FLARE, 0.0, b.w + 2.0 * FLARE, b.h + 2.0).contains(x, y)
+    // The gap above a floating notch counts too, so flicking the mouse to the screen edge opens it.
+    let top = -app.notch.gap.value;
+    R::new(b.x - FLARE, top, b.w + 2.0 * FLARE, b.h + 2.0 - top).contains(x, y)
         || (app.notch.pill_alpha.value > 0.5 && y > b.bottom() && y < b.bottom() + PILL_SPACE && (x - b.cx()).abs() < app.notch.pill_w.value / 2.0)
 }
 
