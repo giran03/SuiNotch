@@ -2,6 +2,11 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.2] - 2026-10-30
+
+### Added
+- Notch styles (docked, floating, flat) with a floating gap setting (0b890bc)
+
 ## [1.0.1] - 2026-10-30
 
 ### Added
