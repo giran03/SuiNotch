@@ -7,8 +7,6 @@ use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-use crate::lrc::Line;
-
 pub const WM_APP_EVENT: u32 = WM_APP + 1;
 pub const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_CAPS: u32 = WM_APP + 3;
@@ -46,7 +44,7 @@ impl MediaInfo {
 pub enum Event {
     Media(Option<MediaInfo>),
     Artwork { key: u64, art: Option<crate::gfx::ArtPixels> },
-    Lyrics { key: u64, lines: Vec<Line> },
+    Lyrics { key: u64, found: Option<crate::lyrics::Found> },
     Volume { level: f32, muted: bool },
     AudioDeviceChanged,
     Network { connected: bool, name: String },

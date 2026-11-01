@@ -12,10 +12,15 @@ impl Ui<'_, '_> {
         let start = self.y;
         self.row_index = 0;
         match self.s.page {
+            _ if !self.s.query.is_empty() => self.search_results(),
             0 => self.general(&cfg),
             1 => self.display(&cfg),
             2 => self.appearance(&cfg),
-            3 => self.music(&cfg),
+            3 => {
+                // What the song on screen has, so the Second line setting can say whether it will show anything.
+                let extras = (!app.lyrics.is_empty()).then(|| (!app.lyrics_translation.is_empty(), !app.lyrics_romaji.is_empty()));
+                self.music(&cfg, app.recent.items.len(), extras)
+            }
             4 => self.todo(&cfg),
             5 => self.calendar(&cfg, app),
             6 => self.pomodoro(&cfg),
@@ -24,6 +29,7 @@ impl Ui<'_, '_> {
             9 => self.clipboard(&cfg, app.clips.items.len()),
             10 => self.hud(&cfg),
             CHANGELOG_PAGE => self.changelog(),
+            DIAG_PAGE => self.diagnostics(),
             _ => self.about(&cfg, &app.update),
         }
         self.s.content_h = self.y - start;
@@ -55,11 +61,12 @@ impl Ui<'_, '_> {
         self.cv.text("Hidden pages keep working: reminders, timers and clipboard history carry on.", R::new(self.x + 4.0, self.y - 12.0, self.w, 18.0), 11.5, 500, DIM, Align::Left);
         self.y += 14.0;
         self.section("Notch");
-        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SEG, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.seg_row(c, r[0], "Size", Some("Applies right away. Auto is larger on wide monitors"), &config::SIZE_LABELS, |c| &mut c.size);
         self.toggle(c, r[1], "Minimal notch", Some("A thin line when nothing is playing"), |c| &mut c.minimal);
-        self.toggle(c, r[2], "Sui mascot", Some("A little droplet that lives in the notch"), |c| &mut c.mascot);
-        self.toggle(c, r[3], "Sui reactions", Some("Sui cheers for finished focus sessions, goals and tasks, and naps on long breaks"), |c| &mut c.sui_reactions);
+        self.toggle(c, r[2], "Tooltips", Some("A short hint when you rest on a button that needs explaining"), |c| &mut c.tooltips);
+        self.toggle(c, r[3], "Sui mascot", Some("A little droplet that lives in the notch"), |c| &mut c.mascot);
+        self.toggle(c, r[4], "Sui reactions", Some("Sui cheers for finished focus sessions, goals and tasks, and naps on long breaks"), |c| &mut c.sui_reactions);
         self.section("Sounds and quiet");
         let r = self.card(&[ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Reminder sounds", Some("Chimes for Pomodoro, To-do and Water"), |c| &mut c.sounds);
@@ -73,19 +80,21 @@ impl Ui<'_, '_> {
         self.title("Display");
         self.section("Show the notch on");
         let monitors = self.s.monitors.clone();
-        let mut heights = vec![ROW, ROW_SUB];
+        let mut heights = vec![ROW, ROW_SUB, ROW_SUB];
         heights.extend(std::iter::repeat_n(ROW, monitors.len()));
         let rows = self.card(&heights);
         let accent = Self::accent(c);
-        let follow = c.display_follow;
-        let auto = !follow && (c.display.is_none() || !monitors.iter().any(|m| Some(&m.device) == c.display.as_ref()));
+        let (follow, follow_mouse) = (c.display_follow, c.display_follow_mouse);
+        let fixed = !follow && !follow_mouse;
+        let auto = fixed && (c.display.is_none() || !monitors.iter().any(|m| Some(&m.device) == c.display.as_ref()));
         self.radio(rows[0], "Main display", Some("Follows the primary monitor"), auto, Act::Display(None), accent);
         self.radio(rows[1], "Follow the active window", Some("The notch moves to the screen you're working on"), follow, Act::DisplayFollow, accent);
+        self.radio(rows[2], "Follow the mouse", Some("The notch moves to the screen the pointer rests on"), follow_mouse, Act::DisplayFollowMouse, accent);
         for (i, m) in monitors.iter().enumerate() {
             let size = format!("{} x {}", m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
             let name = format!("Display {}{}", i + 1, if m.primary { " (primary)" } else { "" });
-            let selected = !auto && !follow && c.display.as_deref() == Some(m.device.as_str());
-            self.radio_with_meta(rows[i + 2], &name, &size, selected, Act::Display(Some(i)), accent);
+            let selected = fixed && c.display.as_deref() == Some(m.device.as_str());
+            self.radio_with_meta(rows[i + 3], &name, &size, selected, Act::Display(Some(i)), accent);
         }
         self.section("Behaviour");
         let r = self.card(&[ROW_SUB, ROW_SEG]);
@@ -153,20 +162,73 @@ impl Ui<'_, '_> {
         self.seg_row(c, r[0], "Time format", Some("System follows your Windows region settings"), &config::CLOCK_LABELS, |c| &mut c.clock_format);
     }
 
-    fn music(&mut self, c: &Config) {
+    /// `extras` is (has a translation, has romaji) for the song on screen, or None when it has no lyrics.
+    fn music(&mut self, c: &Config, recent: usize, extras: Option<(bool, bool)>) {
         self.title("Music and lyrics");
         self.section("Lyrics");
-        let r = self.card(&[ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Open lyrics automatically", Some("Show the lyrics panel whenever the Music page opens"), |c| &mut c.lyrics_auto);
-        self.toggle(c, r[1], "Lyrics under the notch", Some("Each line lights up in a pill below the closed notch"), |c| &mut c.lyrics_pill);
+        self.toggle(c, r[1], "Show lyrics in the closed notch", Some("The current line, in the look chosen below"), |c| &mut c.lyrics_pill);
+        let tries = |v: u32| match v {
+            0 => "No retries".to_string(),
+            1 => "1 retry".to_string(),
+            n => format!("{n} retries"),
+        };
+        self.stepper(c, r[2], "Keep searching for", Some("When no lyrics are found, search again this many times. Each retry tries the English and native titles"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
+        self.lyric_look_settings(c, extras);
         self.section("Now playing");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Equalizer animation", Some("Moving bars in the closed notch while music plays"), |c| &mut c.equalizer);
         self.toggle(c, r[1], "Artwork glow", Some("Tint the notch with the colours of the album cover"), |c| &mut c.artwork_glow);
         self.toggle(c, r[2], "Show player name", Some("Spotify, Apple Music, Chrome and others"), |c| &mut c.show_source);
         self.section("Privacy");
-        let r = self.card(&[ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Lyrics come from LRCLIB", Some("Only the song title, artist, album and length are sent"), "lrclib.net", Act::Website, false);
+        self.toggle(c, r[1], "Fall back to NetEase", Some("Asks NetEase when LRCLIB has none or for romaji and translations, and Apple's store for native titles. Sends the title and artist"), |c| &mut c.lyrics_fallback);
+        self.toggle(c, r[2], "Keep lyrics on this PC", Some("A song already looked up shows at once, even offline"), |c| &mut c.lyrics_cache);
+        self.button(r[3], "Clear saved lyrics", Some("Removes the lyrics kept on this PC; they are fetched again when needed"), "Clear", Act::ClearLyricsCache, true);
+        let sub = format!("{recent} song{} in the Recently played list", if recent == 1 { "" } else { "s" });
+        self.button(r[4], "Clear recently played", Some(&sub), "Clear", Act::ClearRecent, true);
+    }
+
+    /// The lyric look: a live preview, then each choice. Rows the other choices make pointless are dimmed.
+    fn lyric_look_settings(&mut self, c: &Config, extras: Option<(bool, bool)>) {
+        use crate::lyric_style as ls;
+        let off = !c.lyrics_pill;
+        let in_notch = !c.lyric_look().below_notch();
+        self.section("Lyrics look");
+        let r = self.card(&[ROW_PREVIEW, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
+        self.lyric_preview(c, r[0]);
+        self.dimmed(off, |ui| {
+            ui.seg_row(c, r[1], "Lyric preset", Some("Start from a look, then change any choice below; it reads Custom once they match no preset"), &ls::PRESET_LABELS, |c| &mut c.lyrics_preset);
+            ui.seg_row(c, r[2], "Placement", Some("Under the notch, or in it in place of the song title"), &ls::PLACE_LABELS, |c| &mut c.lyrics_place);
+        });
+        self.dimmed(off || in_notch, |ui| {
+            let sub = if in_notch { "Not used in the notch: the notch itself is the backdrop" } else { "What sits behind the line. Album tint follows the cover" };
+            ui.seg_row(c, r[3], "Backdrop", Some(sub), &ls::BACKDROP_LABELS, |c| &mut c.lyrics_backdrop);
+        });
+        self.dimmed(off, |ui| {
+            ui.seg_row(c, r[4], "Highlight", Some("Karaoke fill colours the line as it is sung, wherever it is placed"), &ls::HIGHLIGHT_LABELS, |c| &mut c.lyrics_highlight);
+            ui.seg_row(c, r[5], "Text colour", Some("Album tint follows the cover; Accent follows your accent colour"), &ls::COLOR_LABELS, |c| &mut c.lyrics_color);
+        });
+        self.section("Lyrics text");
+        let r = self.card(&[ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
+        self.dimmed(off, |ui| {
+            ui.seg_row(c, r[0], "Text size", Some("The size of the line; a second line is a little smaller"), &ls::SIZE_LABELS, |c| &mut c.lyrics_size);
+            ui.seg_row(c, r[1], "New lines", Some("How each new line arrives"), &ls::ENTER_LABELS, |c| &mut c.lyrics_enter);
+            ui.seg_row(c, r[2], "Long lines", Some("A line wider than there is room for can shrink, scroll to its end, or be cut"), &ls::FIT_LABELS, |c| &mut c.lyrics_fit);
+            ui.seg_row(c, r[3], "When paused", Some("Keep the line on show, dimmed, while the music is paused"), &ls::PAUSED_LABELS, |c| &mut c.lyrics_paused);
+        });
+        self.section("Second line");
+        let r = self.card(&[ROW_SEG, ROW_SEG]);
+        // Says whether the song on screen has what is asked for, so an empty second line is not a mystery.
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        let note = match extras {
+            Some((translation, romaji)) => format!("Under the line, or after it in the notch. This song: translation {}, romaji {}", yes(translation), yes(romaji)),
+            None => "Under the line, or after it in the notch. Romaji and translations come from NetEase, for songs that have them".to_string(),
+        };
+        self.dimmed(off, |ui| ui.seg_row(c, r[0], "Second line", Some(&note), &ls::SECOND_LABELS, |c| &mut c.lyrics_second));
+        self.seg_row(c, r[1], "Under each line in the panel", Some("Romaji or a translation in the open lyrics panel; its Aあ button switches it too"), &ls::PANEL_ALT_LABELS, |c| &mut c.lyrics_panel_alt);
     }
 
     fn todo(&mut self, c: &Config) {
@@ -394,7 +456,65 @@ impl Ui<'_, '_> {
         }
         self.seg_row(cfg, r[2], "Automatic updates", Some("Automatic installs only while you're away from the PC"), &update::MODE_LABELS, |c| &mut c.update_mode);
         self.section("Your data");
-        let r = self.card(&[ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB]);
         self.button(r[0], "Stored only on this PC", Some("Tasks, water log, shelf and settings. No accounts, no tracking"), "Open folder", Act::OpenData, false);
+        self.button(r[1], "Diagnostics", Some("Monitors, full-screen detection, players and the log"), "Open", Act::Link(DIAG_PAGE), false);
+    }
+
+    /// Results for what is typed in the sidebar search; each opens the page its setting lives on.
+    fn search_results(&mut self) {
+        const MAX_RESULTS: usize = 12;
+        let query = self.s.query.clone();
+        self.title("Search");
+        let found = search::matches(&query);
+        if found.is_empty() {
+            self.cv.text(&format!("No settings match \"{query}\""), R::new(self.x + 4.0, self.y, self.w - 8.0, 22.0), 13.0, 500, DIM, Align::Left);
+            self.y += 40.0;
+            return;
+        }
+        self.section(&format!("{} result{}", found.len(), if found.len() == 1 { "" } else { "s" }));
+        let shown: Vec<usize> = found.into_iter().take(MAX_RESULTS).collect();
+        let rows = self.card(&vec![ROW_SUB; shown.len()]);
+        for (row, &i) in rows.iter().zip(&shown) {
+            let entry = &search::INDEX[i];
+            let act = Act::Found(i);
+            self.s.hits.push((*row, act));
+            if hovered(self.s, act) {
+                self.cv.fill_rrect(row.inset(4.0, 3.0), 9.0 * self.round, C::WHITE.a(0.03));
+            }
+            self.label_fit(*row, entry.label, Some(search::page_name(entry.page)), 44.0);
+            self.cv.glyph('\u{E76C}', row.right() - 26.0, row.cy(), 10.0, DIM);
+        }
+    }
+
+    /// What SuiNotch sees on this PC, for troubleshooting; see `diag` for how it is gathered.
+    fn diagnostics(&mut self) {
+        self.title("Diagnostics");
+        let r = self.card(&[ROW_SUB]);
+        self.button(r[0], "Taken when this page opened", Some("Refresh to look again, for example after a game starts"), "Refresh", Act::DiagRefresh, false);
+        let diag = self.s.diag.clone();
+        for (name, rows) in &diag.groups {
+            self.section(name);
+            let cards = self.card(&vec![ROW; rows.len()]);
+            for (row, (key, value)) in cards.iter().zip(rows) {
+                self.label_fit(*row, key, None, row.w * 0.62);
+                self.cv.text(value, R::new(row.x + row.w * 0.38, row.y, row.w * 0.62 - 16.0, row.h), 12.0, 500, DIM, Align::Right);
+            }
+        }
+        self.section("Log");
+        if diag.log.is_empty() {
+            self.cv.text("Nothing has been logged", R::new(self.x + 4.0, self.y, self.w - 8.0, 20.0), 12.5, 500, DIM, Align::Left);
+            self.y += 34.0;
+        } else {
+            let cards = self.card(&vec![22.0; diag.log.len()]);
+            for (row, line) in cards.iter().zip(&diag.log) {
+                self.cv.text(line, R::new(row.x + 16.0, row.y, row.w - 32.0, row.h), 11.0, 500, DIM, Align::Left);
+            }
+        }
+        self.section("Tools");
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        self.button(r[0], "Copy debug info", Some("Everything above, ready to paste into a bug report"), "Copy", Act::DiagCopy, false);
+        self.button(r[1], "Open the log file", Some("suinotch.log in the data folder"), "Open", Act::OpenLog, false);
+        self.button(r[2], "Back to About", None, "Back", Act::Link(ABOUT_PAGE), false);
     }
 }

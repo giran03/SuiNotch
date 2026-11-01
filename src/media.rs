@@ -258,7 +258,7 @@ fn read_thumbnail(session: &Session) -> Result<Vec<u8>> {
 
 fn refresh(with_art: bool) {
     let Some(session) = active_session() else {
-        post(Event::Media(None));
+        post_nothing_playing();
         return;
     };
     match snapshot(&session, with_art) {
@@ -278,11 +278,17 @@ fn refresh(with_art: bool) {
                 post(Event::Artwork { key, art });
             }
         }
-        _ => {
-            *LAST_POSTED.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            post(Event::Media(None));
-        }
+        _ => post_nothing_playing(),
     }
+}
+
+/// Tells the UI nothing is playing and forgets what was last sent, so the same track
+/// coming back (identical info, same position) is not mistaken for "no change" and dropped.
+fn post_nothing_playing() {
+    *LAST_POSTED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *LAST_ART_KEY.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+    *TRACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    post(Event::Media(None));
 }
 
 /// Skips updates that only confirm where playback already is, so steady playback costs no redraws.

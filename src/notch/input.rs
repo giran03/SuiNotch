@@ -14,7 +14,10 @@ pub(super) fn inside_body(app: &App, x: f32, y: f32) -> bool {
     // The gap above a floating notch counts too, so flicking the mouse to the screen edge opens it.
     let top = -app.notch.gap.value;
     R::new(b.x - FLARE, top, b.w + 2.0 * FLARE, b.h + 2.0 - top).contains(x, y)
-        || (app.notch.pill_alpha.value > 0.5 && y > b.bottom() && y < b.bottom() + PILL_SPACE && (x - b.cx()).abs() < app.notch.pill_w.value / 2.0)
+        || (app.notch.pill_alpha.value > 0.5
+            && y > b.bottom()
+            && y < b.bottom() + app.cfg.lyric_look().room_below(app.notch.pill_h.value)
+            && (x - b.cx()).abs() < app.notch.pill_w.value / 2.0)
 }
 
 pub(super) fn on_mouse_move(app: &mut App, x: f32, y: f32) {
@@ -52,7 +55,7 @@ pub(super) fn on_mouse_move(app: &mut App, x: f32, y: f32) {
         app.notch.volume_open.set(0.0);
     }
     if app.notch.vol_drag {
-        set_volume_from(app, x);
+        set_volume_from(app, y);
     }
     if app.notch.seek_drag.is_some() {
         if let Some(r) = views::seek_bar_rect(app) {
@@ -93,9 +96,9 @@ pub(super) fn on_mouse_leave(app: &mut App) {
     request_frame(app);
 }
 
-pub(super) fn set_volume_from(app: &mut App, x: f32) {
+pub(super) fn set_volume_from(app: &mut App, y: f32) {
     if let (Some(r), Some(audio)) = (views::volume_bar_rect(app), app.audio.as_ref()) {
-        audio.set(((x - r.x) / r.w).clamp(0.0, 1.0));
+        audio.set((1.0 - (y - r.y) / r.h).clamp(0.0, 1.0));
     }
 }
 
@@ -108,7 +111,7 @@ pub(super) fn on_button_down(app: &mut App, x: f32, y: f32) {
     match hit {
         Some(Hit::VolumeBar) => {
             app.notch.vol_drag = true;
-            set_volume_from(app, x);
+            set_volume_from(app, y);
         }
         Some(Hit::Seek) => {
             if let Some(r) = views::seek_bar_rect(app) {

@@ -32,13 +32,36 @@ pub fn pressed(app: &App, h: Hit) -> bool {
 }
 
 pub fn icon_button(cv: &Canvas, app: &mut App, cx: f32, cy: f32, size: f32, glyph: char, h: Hit, color: C) {
+    icon_button_with(cv, app, cx, cy, size, h, |cv, s| cv.glyph(glyph, cx, cy, s, color));
+}
+
+/// An icon button whose picture is drawn by `draw` (given the size, which dips a little while pressed),
+/// for icons the icon font doesn't have.
+pub fn icon_button_with(cv: &Canvas, app: &mut App, cx: f32, cy: f32, size: f32, h: Hit, draw: impl FnOnce(&Canvas, f32)) {
     let r = R::centered(cx, cy, size * 2.1, size * 2.1);
     hit(app, r, h);
     if hovered(app, h) {
         cv.fill_circle(cx, cy, size * 1.05, if pressed(app, h) { SUBTLE } else { FAINT });
     }
-    let s = if pressed(app, h) { size * 0.92 } else { size };
-    cv.glyph(glyph, cx, cy, s, color);
+    draw(cv, if pressed(app, h) { size * 0.92 } else { size });
+}
+
+/// A speech bubble with two lines of text in it: the lyrics icon. `size` matches an icon-font glyph of that size.
+pub fn lyrics_glyph(cv: &Canvas, cx: f32, cy: f32, size: f32, color: C) {
+    // Sized to match the icon-font glyphs beside it (about `size` across). The body sits a little above
+    // the centre so that, with the tail, the whole bubble is centred on `cy` like they are.
+    let stroke = (size * 0.11).max(1.1);
+    let body = R::centered(cx, cy - size * 0.14, size * 1.15, size * 0.92);
+    cv.stroke_rrect(body, size * 0.26, color, stroke);
+    // The tail, at the bottom left, drawn solid so it joins the outline.
+    if let Some(mut p) = cv.path() {
+        let base = body.bottom() - stroke * 0.5;
+        p.move_to(body.x + size * 0.24, base).line_to(body.x + size * 0.17, base + size * 0.27).line_to(body.x + size * 0.46, base);
+        cv.fill_path(&p.finish(true), color);
+    }
+    let (left, right) = (body.x + size * 0.26, body.right() - size * 0.26);
+    cv.line(left, body.cy() - size * 0.12, right, body.cy() - size * 0.12, color, stroke);
+    cv.line(left, body.cy() + size * 0.14, left + (right - left) * 0.62, body.cy() + size * 0.14, color, stroke);
 }
 
 pub fn pill_button(cv: &Canvas, app: &mut App, r: R, label: &str, h: Hit, primary: bool) {
@@ -153,8 +176,29 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
         cv.fill_rrect(r, 12.0, accent(app).a(a));
         cv.text(&text, r, 12.0, 600, readable_on(accent(app)).a(a), Align::Center);
     }
+    draw_tooltip(cv, app, body);
     cv.pop();
     draw_pill(cv, app, body);
+}
+
+/// The hint for the button under the pointer, fading in just above it and sliding between buttons.
+fn draw_tooltip(cv: &mut Canvas, app: &App, body: R) {
+    let n = &app.notch;
+    let a = n.tip_alpha.value.clamp(0.0, 1.0);
+    if a < 0.01 || n.tip_text.is_empty() {
+        return;
+    }
+    let (w, h) = (app.gfx.text_width(&n.tip_text, 11.5, 600) + 22.0, 24.0);
+    let x = (n.tip_x.value - w / 2.0).clamp(body.x + 8.0, (body.right() - 8.0 - w).max(body.x + 8.0));
+    // It drifts a few pixels toward its resting place as it fades in.
+    let rise = (1.0 - a) * 5.0;
+    let y = if n.tip_below { n.tip_y.value - rise } else { n.tip_y.value - h + rise };
+    let r = R::new(x, y, w, h);
+    cv.push_opacity(a);
+    cv.fill_rrect(r, 8.0, C(0.2, 0.21, 0.25, 1.0));
+    cv.stroke_rrect(r, 8.0, C::WHITE.a(0.1), 1.0);
+    cv.text(&n.tip_text, r, 11.5, 600, C::WHITE, Align::Center);
+    cv.pop();
 }
 
 // ------------------------------------------------------------------ closed states
@@ -220,8 +264,53 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
     cv.display(&time, R::new(body.x, 0.0, body.w, body.h), 13.5, 650, C::WHITE, Align::Center);
 }
 
-/// The song title in the closed notch, then the artist in the space that's left.
-fn closed_track(cv: &Canvas, app: &App, r: R) {
+/// The song title in the closed notch, then the artist in the space that's left. With the In the notch
+/// lyric style, the current lyric line fades in over the title while there is one.
+fn closed_track(cv: &mut Canvas, app: &App, r: R) {
+    let look = app.cfg.lyric_look();
+    let lyric = (!look.below_notch())
+        .then(|| app.notch.pill_line.and_then(|i| app.lyrics.get(i).map(|l| (i, l.text.clone()))))
+        .flatten();
+    let shown = if lyric.is_some() { app.notch.pill_alpha.value.clamp(0.0, 1.0) } else { 0.0 };
+    if shown < 0.99 {
+        cv.push_opacity(1.0 - shown);
+        title_and_artist(cv, app, r);
+        cv.pop();
+    }
+    if let (Some((i, text)), true) = (lyric, shown > 0.01 && r.w >= 24.0) {
+        let second = if app.has_second_line() { app.second_line(i) } else { None };
+        let frame = lyric_frame(app, look, &text, second.as_deref(), i);
+        cv.push_opacity(shown * paused_dim(app));
+        crate::lyric_draw::draw_in_notch(cv, r, &frame);
+        cv.pop();
+    }
+}
+
+/// Opacity of the lyric line: dimmed while the music is paused and the line is kept on show.
+fn paused_dim(app: &App) -> f32 {
+    if app.media.as_ref().is_some_and(|m| m.info.playing) {
+        1.0
+    } else {
+        0.55
+    }
+}
+
+/// Everything the lyric drawing needs to know about line `i` of the song on screen.
+fn lyric_frame<'a>(app: &App, look: crate::lyric_style::Look, text: &'a str, second: Option<&'a str>, i: usize) -> crate::lyric_draw::Frame<'a> {
+    crate::lyric_draw::Frame {
+        text,
+        second,
+        look,
+        fade: app.notch.line_fade.value,
+        sung: crate::lyric_style::progress(&app.lyrics, i, app.lyric_pos().unwrap_or(0)),
+        secs: app.notch.line_since.elapsed().as_secs_f32(),
+        art: app.art_color,
+        accent: accent(app),
+        glass: app.cfg.glass,
+    }
+}
+
+fn title_and_artist(cv: &Canvas, app: &App, r: R) {
     let Some(info) = app.media.as_ref().map(|m| &m.info) else { return };
     if r.w < 24.0 {
         return;
@@ -340,20 +429,22 @@ pub fn battery_icon(cv: &Canvas, cx: f32, cy: f32, percent: u8, charging: bool, 
 
 // ------------------------------------------------------------------ lyrics pill
 
+/// The current lyric line under the closed notch, in the chosen style (see `lyric_style`).
 fn draw_pill(cv: &mut Canvas, app: &mut App, body: R) {
     let a = app.notch.pill_alpha.value.clamp(0.0, 1.0);
-    if a < 0.01 {
+    let look = app.cfg.lyric_look();
+    if a < 0.01 || !look.below_notch() {
         return;
     }
     let Some(i) = app.notch.pill_line else { return };
     let Some(line) = app.lyrics.get(i).map(|l| l.text.clone()) else { return };
+    let second = if app.has_second_line() { app.second_line(i) } else { None };
+    let h = app.notch.pill_h.value.max(look.one_line_height());
     let w = app.notch.pill_w.value.max(40.0);
-    let r = R::centered(body.cx(), body.bottom() + 8.0 + 13.0 - (1.0 - a) * 8.0, w, 26.0);
-    cv.push_opacity(a);
-    cv.fill_rrect(r, 13.0, if app.cfg.glass { C(0.05, 0.055, 0.07, 0.9) } else { C::BLACK });
-    let f = app.notch.line_fade.value.clamp(0.0, 1.0);
-    let color = app.art_color.map(|c| c.mix(C::WHITE, 0.55)).unwrap_or(C::WHITE);
-    cv.text(&line, r.inset(14.0, 0.0).offset(0.0, (1.0 - f) * 5.0), 12.5, 600, color.a(f), Align::Center);
+    let r = R::centered(body.cx(), body.bottom() + 8.0 + h / 2.0 - (1.0 - a) * 8.0, w, h);
+    let frame = lyric_frame(app, look, &line, second.as_deref(), i);
+    cv.push_opacity(a * paused_dim(app));
+    crate::lyric_draw::draw_under(cv, r, &frame);
     cv.pop();
 }
 
@@ -457,7 +548,8 @@ pub fn seek_bar_rect(app: &App) -> Option<R> {
 }
 
 pub fn volume_bar_rect(app: &App) -> Option<R> {
-    app.notch.hits.iter().find(|(_, h)| *h == Hit::VolumeBar).map(|(r, _)| r.inset(6.0, 0.0))
+    // Vertical track inside the flyout's hit area, centred, with room for the knob at each end.
+    app.notch.hits.iter().find(|(_, h)| *h == Hit::VolumeBar).map(|(r, _)| R::new(r.cx() - 2.5, r.y + 10.0, 5.0, r.h - 30.0))
 }
 
 pub fn todo_overflow(app: &App) -> f32 {
@@ -503,7 +595,36 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::Next => media::command(Command::Next),
         Hit::Source => media::command(Command::NextSource),
         Hit::Seek | Hit::VolumeBar => {}
-        Hit::LyricsToggle => app.notch.lyrics_view = !app.notch.lyrics_view,
+        Hit::LyricsToggle => {
+            app.notch.lyrics_view = !app.notch.lyrics_view;
+            app.notch.recent_view &= !app.notch.lyrics_view;
+        }
+        Hit::LyricsAlt => {
+            // Steps through off, romaji and translation, skipping what this song doesn't have.
+            let has = [true, !app.lyrics_romaji.is_empty(), !app.lyrics_translation.is_empty()];
+            let mut c = app.cfg.clone();
+            let mut next = c.lyrics_panel_alt;
+            for _ in 0..has.len() {
+                next = (next + 1) % has.len();
+                if has[next] {
+                    break;
+                }
+            }
+            c.lyrics_panel_alt = next;
+            app.set_config(c);
+        }
+        Hit::RecentToggle => {
+            app.notch.recent_view = !app.notch.recent_view;
+            app.notch.lyrics_view &= !app.notch.recent_view;
+        }
+        Hit::Recent(i) => {
+            if let Some(p) = app.recent.items.get(i) {
+                let text = if p.artist.is_empty() { p.title.clone() } else { format!("{} - {}", p.artist, p.title) };
+                if crate::sys::copy_text(app.notch.hwnd, &text) {
+                    notch::notice(app, "Copied");
+                }
+            }
+        }
         Hit::LyricsEarlier | Hit::LyricsLater => {
             if let Some(key) = app.media.as_ref().map(|m| m.info.track_key()) {
                 let step = if h == Hit::LyricsLater { crate::lyrics::SHIFT_STEP_MS } else { -crate::lyrics::SHIFT_STEP_MS };
@@ -516,7 +637,8 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
                 app.lyrics_attempt += 1;
                 app.lyrics.clear();
                 app.lyrics_key = 0;
-                crate::lyrics::fetch(info, app.lyrics_attempt);
+                app.lyrics_source = None;
+                crate::lyrics::fetch(info, app.lyrics_attempt, crate::lyrics::Options::from_config(&app.cfg));
             }
         }
         Hit::FocusMode(_)

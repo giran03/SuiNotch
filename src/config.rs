@@ -24,6 +24,8 @@ pub struct Config {
     pub start_with_windows: bool,
     pub size: usize,
     pub minimal: bool,
+    /// Short hints that fade in when the pointer rests on a button that needs explaining.
+    pub tooltips: bool,
     pub mascot: bool,
     pub sounds: bool,
     pub hide_fullscreen: bool,
@@ -40,6 +42,8 @@ pub struct Config {
     pub display: Option<String>,
     /// Move the notch to whichever monitor holds the active window.
     pub display_follow: bool,
+    /// The notch moves to the monitor the mouse pointer rests on.
+    pub display_follow_mouse: bool,
     pub expand_on_hover: bool,
     pub hover_delay: usize,
     // Appearance
@@ -59,6 +63,34 @@ pub struct Config {
     // Music and lyrics
     pub lyrics_auto: bool,
     pub lyrics_pill: bool,
+    /// Ask NetEase Cloud Music for lyrics LRCLIB does not have.
+    pub lyrics_fallback: bool,
+    /// Keep looked-up lyrics on disk so a song is only searched for once.
+    pub lyrics_cache: bool,
+    /// How many more times to search for a song's lyrics when the first search finds none; 0 searches
+    /// once. Each retry searches under every name the song goes by. Settings from before this was a
+    /// count (it was seconds) carry over under the old name.
+    #[serde(alias = "lyrics_search_s")]
+    pub lyrics_retries: u32,
+    /// The single style index of earlier versions, read once and turned into the choices below; never written.
+    #[serde(skip_serializing)]
+    pub lyrics_style: Option<usize>,
+    /// Which preset the choices below add up to (`lyric_style::PRESET_LABELS`); worked out on load, never written.
+    #[serde(skip)]
+    pub lyrics_preset: usize,
+    // How the current line looks while the notch is closed; each is an index into the labels in `lyric_style`.
+    pub lyrics_place: usize,
+    pub lyrics_backdrop: usize,
+    pub lyrics_highlight: usize,
+    pub lyrics_color: usize,
+    pub lyrics_size: usize,
+    pub lyrics_enter: usize,
+    pub lyrics_fit: usize,
+    pub lyrics_paused: usize,
+    /// What the pill shows on a second line: an index into `lyric_style::SECOND_LABELS`.
+    pub lyrics_second: usize,
+    /// What the lyrics panel shows under each line: an index into `lyric_style::PANEL_ALT_LABELS`.
+    pub lyrics_panel_alt: usize,
     pub equalizer: bool,
     pub show_source: bool,
     /// AppUserModelID of the player last picked with the switch; picked again when it reopens.
@@ -124,6 +156,7 @@ impl Default for Config {
             start_with_windows: true,
             size: 0,
             minimal: false,
+            tooltips: true,
             mascot: true,
             sounds: true,
             hide_fullscreen: true,
@@ -133,6 +166,7 @@ impl Default for Config {
             hidden_pages: Vec::new(),
             display: None,
             display_follow: false,
+            display_follow_mouse: false,
             expand_on_hover: true,
             hover_delay: 1,
             accent: 0,
@@ -147,6 +181,21 @@ impl Default for Config {
             glass: false,
             lyrics_auto: false,
             lyrics_pill: true,
+            lyrics_fallback: true,
+            lyrics_cache: true,
+            lyrics_retries: 3,
+            lyrics_style: None,
+            lyrics_preset: 0,
+            lyrics_place: 0,
+            lyrics_backdrop: 0,
+            lyrics_highlight: 0,
+            lyrics_color: 0,
+            lyrics_size: 1,
+            lyrics_enter: 0,
+            lyrics_fit: 0,
+            lyrics_paused: 0,
+            lyrics_second: 0,
+            lyrics_panel_alt: 0,
             equalizer: true,
             show_source: true,
             preferred_player: String::new(),
@@ -289,6 +338,8 @@ impl Config {
         self.long_break_min = self.long_break_min.clamp(5, 60);
         self.sessions_before_long = self.sessions_before_long.clamp(2, 8);
         self.focus_mode = self.focus_mode.min(2);
+        self.lyrics_retries = self.lyrics_retries.min(MAX_LYRICS_RETRIES);
+        crate::lyric_style::sanitize(&mut self);
         self.notch_style = self.notch_style.min(NOTCH_STYLE_LABELS.len() - 1);
         self.notch_gap = self.notch_gap.clamp(MIN_NOTCH_GAP, MAX_NOTCH_GAP);
         self.timer_min = self.timer_min.clamp(1, crate::timers::MAX_MIN);
@@ -317,6 +368,9 @@ impl Config {
         !self.hidden_pages.iter().any(|k| k == key)
     }
 }
+
+/// Most times a song's lyrics are searched for again after the first try finds nothing.
+pub const MAX_LYRICS_RETRIES: u32 = 10;
 
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -370,6 +424,15 @@ mod tests {
         assert_eq!(c.focus_min, 50);
         assert_eq!(c.short_break_min, 5);
         assert!(c.hud_volume);
+    }
+
+    #[test]
+    fn the_old_seconds_setting_becomes_the_retry_count() {
+        let old: Config = serde_json::from_str(r#"{"lyrics_search_s": 7}"#).unwrap();
+        assert_eq!(old.lyrics_retries, 7);
+        let huge: Config = serde_json::from_str(r#"{"lyrics_retries": 500}"#).unwrap();
+        assert_eq!(huge.sanitized().lyrics_retries, MAX_LYRICS_RETRIES);
+        assert_eq!(Config::default().lyrics_retries, 3);
     }
 
     #[test]

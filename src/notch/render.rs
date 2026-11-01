@@ -99,6 +99,7 @@ pub(super) fn frame(app: &mut App) {
     let n = &mut app.notch;
     n.page_pos.set(idx);
     update_pill(app);
+    update_tip(app);
 
     let mut moving = false;
     let mut morphing = false;
@@ -189,10 +190,21 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
     if n.field.is_some() {
         next = next.min(500);
     }
+    if let Some(due) = n.tip_ready_at {
+        next = next.min(due.saturating_duration_since(Instant::now()).as_millis() as u64 + 1);
+    }
     if let Some(m) = &app.media {
         if m.info.playing {
             if n.expanded && n.page == Page::Music {
                 next = next.min(if n.lyrics_view { 120 } else { 500 });
+            }
+            // The karaoke fill creeps along the line, and a long line scrolls, so they need a steady
+            // stream of frames while shown.
+            if n.pill_alpha.target > 0.5 {
+                let look = app.cfg.lyric_look();
+                if look.karaoke || (look.fit == crate::lyric_style::Fit::Scroll && n.pill_overflow) {
+                    next = next.min(33);
+                }
             }
             if let Some(i) = app.current_line() {
                 if let Some(line) = app.lyrics.get(i + 1) {
@@ -249,42 +261,107 @@ pub(super) fn expire_transients(app: &mut App) {
     }
 }
 
+/// How long the pointer rests on a button before its tooltip fades in.
+const TIP_DELAY: Duration = Duration::from_millis(550);
+const TIP_HEIGHT: f32 = 24.0;
+/// Space between a button and its tooltip.
+const TIP_GAP: f32 = 8.0;
+
+/// Decides whether a tooltip should show for the button under the pointer, and where it points.
+/// It waits a moment on the first button, then follows the pointer from button to button at once
+/// and slides across, so exploring the row of controls feels continuous.
+pub(super) fn update_tip(app: &mut App) {
+    let n = &app.notch;
+    let active = app.cfg.tooltips && n.expanded && n.pressed.is_none() && n.field.is_none() && !n.vol_drag;
+    let hover = if active { n.hover } else { None };
+    let text = hover.and_then(|h| crate::tooltips::text(app, h));
+    let rect = hover.and_then(|h| app.notch.hits.iter().rev().find(|(_, x)| *x == h).map(|(r, _)| *r));
+    let n = &mut app.notch;
+    if hover != n.tip_for {
+        n.tip_warm = n.tip_alpha.target > 0.5;
+        n.tip_for = hover;
+        n.tip_since = Instant::now();
+    }
+    n.tip_ready_at = None;
+    let (Some(text), Some(r)) = (text, rect) else {
+        n.tip_alpha.set(0.0);
+        return;
+    };
+    let due = n.tip_since + if n.tip_warm { Duration::ZERO } else { TIP_DELAY };
+    if Instant::now() < due {
+        n.tip_alpha.set(0.0);
+        n.tip_ready_at = Some(due);
+        return;
+    }
+    let was_shown = n.tip_alpha.target > 0.5;
+    let below = r.y - TIP_GAP - TIP_HEIGHT < 6.0;
+    let edge = if below { r.bottom() + TIP_GAP } else { r.y - TIP_GAP };
+    n.tip_text = text;
+    n.tip_below = below;
+    if was_shown {
+        n.tip_x.set(r.cx());
+        n.tip_y.set(edge);
+    } else {
+        n.tip_x.snap(r.cx());
+        n.tip_y.snap(edge);
+    }
+    n.tip_alpha.set(1.0);
+}
+
 pub(super) fn update_pill(app: &mut App) {
+    let look = app.cfg.lyric_look();
     let line = app.current_line();
+    let shown = app.media.as_ref().is_some_and(|m| m.info.playing || look.keep_paused);
     let visible_text = line
         .and_then(|i| app.lyrics.get(i))
         .map(|l| l.text.clone())
         .filter(|t| !t.is_empty())
-        .filter(|_| app.cfg.lyrics_pill && app.media.as_ref().is_some_and(|m| m.info.playing));
+        .filter(|_| app.cfg.lyrics_pill && shown);
+    // The pill makes room for a second line only when the song has one to show, decided for the whole
+    // song so it does not jump between lines.
+    let tall = app.has_second_line();
+    let second = line.filter(|_| tall).and_then(|i| app.second_line(i));
+    let widths = visible_text.as_ref().map(|t| {
+        let first = app.gfx.text_width(t, look.font(), 600);
+        let second = second.as_ref().map(|s| app.gfx.text_width(s, look.second_font(), 500));
+        match (look.below_notch(), second) {
+            (false, Some(s)) => first + crate::lyric_draw::SUFFIX_GAP + s,
+            (true, Some(s)) => first.max(s),
+            (_, None) => first,
+        }
+    });
     let n = &mut app.notch;
     let show = visible_text.is_some() && !n.expanded && n.alert.is_none() && !n.drag_over;
     if line != n.pill_line {
         n.pill_line = line;
+        n.line_since = Instant::now();
         n.line_fade.snap(0.0);
         n.line_fade.set(1.0);
     }
     n.pill_alpha.set(if show { 1.0 } else { 0.0 });
-    if let Some(t) = visible_text {
-        let tw = app.gfx.text_width(&t, 12.5, 600).min(560.0);
-        app.notch.pill_w.set(tw + 34.0);
+    n.pill_h.set(look.pill_height(tall));
+    if let Some(tw) = widths {
+        n.pill_overflow = tw > crate::lyric_style::MAX_LINE_W;
+        n.pill_w.set(tw.min(crate::lyric_style::MAX_LINE_W) + 34.0);
     }
 }
 
 /// Draws and presents one frame; returns (draw ms, present ms).
 pub(super) fn render(app: &mut App) -> Result<(f32, f32)> {
     let t0 = Instant::now();
+    let lyric_room = app.cfg.lyric_look().room_below(app.notch.pill_h.value);
     let n = &mut app.notch;
     let pill = n.pill_alpha.value > 0.01;
     let max_w = n.w.value.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW);
     let win_w = max_w.ceil();
     let gap = n.gap.value.max(0.0);
-    let win_h = (gap + n.h.value + SHADOW + if pill { PILL_SPACE } else { 0.0 }).ceil().max(8.0);
+    let win_h = (gap + n.h.value + SHADOW + if pill { lyric_room } else { 0.0 }).ceil().max(8.0);
     n.win = (win_w, win_h);
     let scale = n.scale;
     let (pw, ph) = ((win_w * scale).ceil() as i32, (win_h * scale).ceil() as i32);
     // Sized once for the largest state so growing never reallocates mid-animation.
     let cap_w = ((MAX_NOTCH_W + 2.0 * (FLARE + SHADOW)) * scale).ceil() as i32;
-    let cap_h = ((MAX_NOTCH_H + crate::config::MAX_NOTCH_GAP as f32 + SHADOW + PILL_SPACE) * scale).ceil() as i32;
+    let cap_h = ((MAX_NOTCH_H + crate::config::MAX_NOTCH_GAP as f32 + SHADOW + crate::lyric_style::ROOM_MAX) * scale).ceil() as i32;
     n.surface.ensure(pw.max(cap_w), ph.max(cap_h));
     if n.rt.is_none() {
         n.rt = Some(gfx::dc_render_target(&app.gfx)?);

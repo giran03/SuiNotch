@@ -51,6 +51,12 @@ pub fn current(lines: &[Line], pos_ms: u64) -> Option<usize> {
     }
 }
 
+/// The line starting at `at_ms`, give or take `tolerance_ms`: a translation is timed alongside its original.
+pub fn line_at(lines: &[Line], at_ms: u64, tolerance_ms: u64) -> Option<&Line> {
+    let i = lines.partition_point(|l| l.at_ms < at_ms.saturating_sub(tolerance_ms));
+    lines.get(i).filter(|l| l.at_ms <= at_ms + tolerance_ms)
+}
+
 /// Plain lyrics without timing get spread evenly across the track so they still scroll.
 pub fn from_plain(text: &str, duration_ms: u64) -> Vec<Line> {
     let rows: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -87,6 +93,15 @@ mod tests {
         assert_eq!(current(&l, 1000), Some(0));
         assert_eq!(current(&l, 4999), Some(1));
         assert_eq!(current(&l, 99_000), Some(2));
+    }
+
+    #[test]
+    fn finds_the_line_that_starts_about_now() {
+        let l = parse("[00:01.00]a\n[00:03.00]b\n[00:05.00]c");
+        assert_eq!(line_at(&l, 3000, 0).map(|x| x.text.as_str()), Some("b"));
+        assert_eq!(line_at(&l, 3400, 500).map(|x| x.text.as_str()), Some("b"));
+        assert_eq!(line_at(&l, 4000, 500), None);
+        assert_eq!(line_at(&[], 0, 500), None);
     }
 
     #[test]

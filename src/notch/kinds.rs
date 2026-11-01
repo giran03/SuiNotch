@@ -116,6 +116,12 @@ pub enum Hit {
     LyricsEarlier,
     LyricsLater,
     LyricsRetry,
+    /// Cycles what the lyrics panel shows under each line: nothing, romaji, a translation.
+    LyricsAlt,
+    /// Swaps the lyrics panel for the list of songs played lately.
+    RecentToggle,
+    /// A song in that list; clicking copies its name.
+    Recent(usize),
     FocusMode(u8),
     TimerPreset(u8),
     TimerStep(i8),

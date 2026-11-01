@@ -25,13 +25,21 @@ use crate::sys::{self, Monitor};
 use crate::update::{self, Status};
 
 mod controls;
+mod diag;
 mod pages;
+mod preview;
+mod search;
 
 use controls::*;
+use preview::ROW_PREVIEW;
 
 pub const ABOUT_PAGE: usize = 11;
 /// "What's new": reached from About, so it has no sidebar entry of its own.
 pub const CHANGELOG_PAGE: usize = 12;
+/// Diagnostics: also reached from About.
+pub const DIAG_PAGE: usize = 13;
+/// Longest text the search box takes.
+const MAX_QUERY_CHARS: usize = 40;
 pub const DEVELOPER: &str = "CafeTako";
 pub const SUPPORT_EMAIL: &str = "support@cafetako.com";
 pub const COFFEE_URL: &str = "https://buymeacoffee.com/cafetako";
@@ -85,12 +93,21 @@ enum Act {
     Step(NumField, i32, u32, u32),
     Display(Option<usize>),
     DisplayFollow,
+    DisplayFollowMouse,
     /// Show or hide the notch page at this index of `Page::ALL`.
     PageToggle(usize),
     PasteCalendar,
     RefreshCalendar,
     RemoveCalendar,
     ClearClips,
+    ClearLyricsCache,
+    ClearRecent,
+    /// A search result: its position in the search index.
+    Found(usize),
+    SearchClear,
+    DiagRefresh,
+    DiagCopy,
+    OpenLog,
     Accent(usize),
     OpenData,
     ClearShelf,
@@ -115,6 +132,10 @@ pub struct SettingsWindow {
     segs: HashMap<usize, Spring>,
     side_sel: Spring,
     monitors: Vec<Monitor>,
+    /// What is typed in the sidebar's search box; results replace the page while it isn't empty.
+    query: String,
+    /// Troubleshooting details for the Diagnostics page, taken when it opens or is refreshed.
+    diag: diag::Diag,
     /// Roundness step the window corners were last set for.
     corners: usize,
     mouse: (f32, f32),
@@ -160,6 +181,8 @@ pub fn open(page: Option<usize>) {
             segs: HashMap::new(),
             side_sel: Spring::new(page as f32, 0.3, 0.86),
             monitors: sys::monitors(),
+            query: String::new(),
+            diag: diag::Diag::default(),
             corners: usize::MAX,
             mouse: (-1.0, -1.0),
             last: Instant::now(),
@@ -343,6 +366,10 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let s = app.settings.as_mut()?;
             match vk {
+                VK_ESCAPE if !s.query.is_empty() => {
+                    s.query.clear();
+                    invalidate(s);
+                }
                 VK_ESCAPE => close(app),
                 VK_UP | VK_DOWN => {
                     let n = CATEGORIES.len() as i32;
@@ -353,6 +380,24 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
                 _ => {}
             }
+            Some(LRESULT(0))
+        }
+        WM_CHAR => {
+            // Typing anywhere in the window goes to the search box.
+            let s = app.settings.as_mut()?;
+            match wparam.0 as u32 {
+                0x08 => {
+                    s.query.pop();
+                }
+                c if c >= 0x20 && c != 0x7f => {
+                    if let Some(ch) = char::from_u32(c).filter(|_| s.query.chars().count() < MAX_QUERY_CHARS) {
+                        s.query.push(ch);
+                    }
+                }
+                _ => return Some(LRESULT(0)),
+            }
+            s.scroll.snap(0.0);
+            invalidate(s);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == T_ANIM => {
@@ -376,12 +421,49 @@ fn invalidate(s: &SettingsWindow) {
 fn act(app: &mut App, a: Act) {
     let mut c = app.cfg.clone();
     match a {
-        Act::Page(p) | Act::Link(p) => {
+        Act::Page(_) | Act::Link(_) | Act::Found(_) => {
+            let p = match a {
+                Act::Page(p) | Act::Link(p) => p,
+                Act::Found(i) => search::INDEX.get(i).map_or(0, |e| e.page),
+                _ => unreachable!(),
+            };
+            let snapshot = (p == DIAG_PAGE).then(|| diag::snapshot(app));
             if let Some(s) = app.settings.as_mut() {
                 s.page = p;
+                s.query.clear();
+                if let Some(d) = snapshot {
+                    s.diag = d;
+                }
                 s.scroll.snap(0.0);
                 invalidate(s);
             }
+            return;
+        }
+        Act::SearchClear => {
+            if let Some(s) = app.settings.as_mut() {
+                s.query.clear();
+                s.scroll.snap(0.0);
+                invalidate(s);
+            }
+            return;
+        }
+        Act::DiagRefresh => {
+            let snapshot = diag::snapshot(app);
+            if let Some(s) = app.settings.as_mut() {
+                s.diag = snapshot;
+                invalidate(s);
+            }
+            return;
+        }
+        Act::DiagCopy => {
+            let text = app.settings.as_ref().map(|s| diag::to_text(&s.diag)).unwrap_or_default();
+            if sys::copy_text(app.notch.hwnd, &text) {
+                crate::notch::notice(app, "Debug info copied");
+            }
+            return;
+        }
+        Act::OpenLog => {
+            sys::open(&diag::log_path());
             return;
         }
         Act::Close => return close(app),
@@ -397,7 +479,14 @@ fn act(app: &mut App, a: Act) {
             let v = f(&mut c);
             *v = !*v;
         }
-        Act::Seg(f, i) => *f(&mut c) = i,
+        Act::Seg(f, i) => {
+            // The preset row is worked out from the other choices, so picking one means applying it.
+            let preset = c.lyrics_preset;
+            *f(&mut c) = i;
+            if c.lyrics_preset != preset {
+                crate::lyric_style::apply_preset(&mut c);
+            }
+        }
         Act::Step(f, d, lo, hi) => {
             let v = f(&mut c);
             *v = (*v as i64 + d as i64).clamp(lo as i64, hi as i64) as u32;
@@ -405,8 +494,16 @@ fn act(app: &mut App, a: Act) {
         Act::Display(i) => {
             c.display = i.and_then(|i| app.settings.as_ref().and_then(|s| s.monitors.get(i)).map(|m| m.device.clone()));
             c.display_follow = false;
+            c.display_follow_mouse = false;
         }
-        Act::DisplayFollow => c.display_follow = true,
+        Act::DisplayFollow => {
+            c.display_follow = true;
+            c.display_follow_mouse = false;
+        }
+        Act::DisplayFollowMouse => {
+            c.display_follow_mouse = true;
+            c.display_follow = false;
+        }
         Act::PageToggle(i) => {
             let key = crate::notch::Page::ALL[i % crate::notch::Page::ALL.len()].key().to_string();
             if c.page_shown(&key) {
@@ -450,6 +547,20 @@ fn act(app: &mut App, a: Act) {
             app.clips.clear();
             app.notch.bitmaps.clear();
             crate::notch::notice(app, "Clipboard history cleared");
+            return;
+        }
+        Act::ClearLyricsCache => {
+            let n = crate::lyrics_cache::clear();
+            crate::notch::notice(app, &format!("Cleared {n} saved lyric{}", if n == 1 { "" } else { "s" }));
+            return;
+        }
+        Act::ClearRecent => {
+            app.recent.clear();
+            config::save_json("recent.json", &app.recent);
+            crate::notch::notice(app, "Recently played cleared");
+            if let Some(s) = &app.settings {
+                invalidate(s);
+            }
             return;
         }
         Act::Accent(i) => {
@@ -583,8 +694,9 @@ fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow, round: f32) {
     // Brand
     crate::tray::draw_mark_at(cv, 22.0, 14.0, 28.0);
     cv.display("SuiNotch", R::new(56.0, 12.0, 140.0, 30.0), 15.0, 700, C::WHITE, Align::Left);
+    draw_search_box(cv, s, round);
     let item_h = 34.0;
-    let top = 60.0;
+    let top = 92.0;
     let y_of = |i: usize| if i == ABOUT_PAGE { H - 18.0 - item_h } else { top + i as f32 * item_h };
     // Sliding selection highlight between two neighbours of the spring position.
     let p = s.side_sel.value;
@@ -608,6 +720,21 @@ fn draw_sidebar(cv: &Canvas, s: &mut SettingsWindow, round: f32) {
         }
         cv.text(cat.name, R::new(tile.right() + 12.0, r.y, r.w - 50.0, r.h), 13.0, if current { 600 } else { 500 }, C::WHITE, Align::Left);
     }
+}
+
+/// The search field under the brand: type anywhere in the window to fill it.
+fn draw_search_box(cv: &Canvas, s: &mut SettingsWindow, round: f32) {
+    let r = R::new(12.0, 50.0, SIDEBAR - 24.0, 30.0);
+    cv.fill_rrect(r, 9.0 * round, C::WHITE.a(0.07));
+    cv.glyph('\u{E721}', r.x + 16.0, r.cy(), 11.0, DIM);
+    if s.query.is_empty() {
+        cv.text("Search settings", R::new(r.x + 30.0, r.y, r.w - 40.0, r.h), 12.5, 500, C::WHITE.a(0.4), Align::Left);
+        return;
+    }
+    cv.text(&s.query, R::new(r.x + 30.0, r.y, r.w - 60.0, r.h), 12.5, 500, C::WHITE, Align::Left);
+    let clear = R::centered(r.right() - 16.0, r.cy(), 24.0, 24.0);
+    s.hits.push((clear, Act::SearchClear));
+    cv.glyph(icon::CLOSE, clear.cx(), clear.cy(), 8.0, if hovered(s, Act::SearchClear) { C::WHITE } else { DIM });
 }
 
 fn draw_title_buttons(cv: &Canvas, s: &mut SettingsWindow) {

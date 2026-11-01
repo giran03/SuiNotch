@@ -19,6 +19,10 @@ pub(super) const ROW: f32 = 48.0;
 pub(super) const ROW_SUB: f32 = 56.0;
 /// A row with a label above a button group, with room between them.
 pub(super) const ROW_SEG: f32 = 96.0;
+/// Width a switch takes at the right of a row: its margin, the switch itself and a gap before it.
+const SWITCH_RESERVED: f32 = 16.0 + 44.0 + 16.0;
+/// A description up to this many line-widths long wraps; longer ones are trimmed.
+const WRAP_LIMIT: f32 = 1.8;
 /// Knob springs for page switches are keyed from here, clear of field-address keys.
 const PAGE_KNOBS: usize = 1;
 /// Line height of release notes on the "What's new" page.
@@ -58,17 +62,47 @@ impl Ui<'_, '_> {
     }
 
     pub(super) fn label(&mut self, r: R, label: &str, sub: Option<&str>) {
-        match sub {
-            Some(sub) => {
-                self.cv.text(label, R::new(r.x + 16.0, r.y + 9.0, r.w * 0.62, 20.0), 13.5, 550, C::WHITE, Align::Left);
-                self.cv.text(sub, R::new(r.x + 16.0, r.y + 29.0, r.w * 0.62, 17.0), 11.5, 500, DIM, Align::Left);
-            }
-            None => self.cv.text(label, R::new(r.x + 16.0, r.y, r.w * 0.62, r.h), 13.5, 550, C::WHITE, Align::Left),
+        self.label_fit(r, label, sub, r.w * 0.38);
+    }
+
+    /// A label and description that use all the room the row's control leaves: `reserved` is the width
+    /// on the right it takes, gap included. A description too long for one line wraps onto a second.
+    pub(super) fn label_fit(&mut self, r: R, label: &str, sub: Option<&str>, reserved: f32) {
+        let w = r.w - 16.0 - reserved;
+        let Some(sub) = sub else {
+            self.cv.text(label, R::new(r.x + 16.0, r.y, w, r.h), 13.5, 550, C::WHITE, Align::Left);
+            return;
+        };
+        let need = self.cv.gfx.text_width(sub, 11.5, 500);
+        // Past about two lines it would spill out of the row, so it is trimmed with an ellipsis instead.
+        if need > w && need < w * WRAP_LIMIT {
+            self.cv.text(label, R::new(r.x + 16.0, r.y + 5.0, w, 20.0), 13.5, 550, C::WHITE, Align::Left);
+            self.cv.wrapped(sub, R::new(r.x + 16.0, r.y + 25.0, w, 30.0), 11.5, 500, DIM, Align::Left);
+            return;
         }
+        #[cfg(debug_assertions)]
+        if need >= w * WRAP_LIMIT {
+            crate::log(&format!("settings description too long for its row: {sub}"));
+        }
+        self.cv.text(label, R::new(r.x + 16.0, r.y + 9.0, w, 20.0), 13.5, 550, C::WHITE, Align::Left);
+        self.cv.text(sub, R::new(r.x + 16.0, r.y + 29.0, w, 17.0), 11.5, 500, DIM, Align::Left);
+    }
+
+    /// Draws what `row` draws dimmed and unclickable when `off`: a row the other choices make pointless.
+    pub(super) fn dimmed(&mut self, off: bool, row: impl FnOnce(&mut Self)) {
+        if !off {
+            row(self);
+            return;
+        }
+        let keep = self.s.hits.len();
+        self.cv.push_opacity(0.38);
+        row(self);
+        self.cv.pop();
+        self.s.hits.truncate(keep);
     }
 
     pub(super) fn toggle(&mut self, cfg: &Config, r: R, label: &str, sub: Option<&str>, f: BoolField) {
-        self.label(r, label, sub);
+        self.label_fit(r, label, sub, SWITCH_RESERVED);
         let on = *f(&mut cfg.clone());
         self.switch(cfg, r, f as usize, on, Act::Toggle(f), true);
     }
@@ -76,7 +110,7 @@ impl Ui<'_, '_> {
     /// A switch for one notch page; the last page still showing can't be switched off.
     pub(super) fn page_toggle(&mut self, cfg: &Config, r: R, index: usize, sub: &str) {
         let page = crate::notch::Page::ALL[index];
-        self.label(r, page.label(), Some(sub));
+        self.label_fit(r, page.label(), Some(sub), SWITCH_RESERVED);
         let on = cfg.page_shown(page.key());
         let last = on && crate::notch::Notch::pages(cfg) == [page];
         self.switch(cfg, r, PAGE_KNOBS + index, on, Act::PageToggle(index), !last);
@@ -124,7 +158,8 @@ impl Ui<'_, '_> {
 
     pub(super) fn seg_row(&mut self, cfg: &Config, r: R, label: &str, sub: Option<&str>, labels: &[&str], f: IndexField) {
         let lr = R::new(r.x, r.y, r.w, if sub.is_some() { 50.0 } else { 38.0 });
-        self.label(lr.offset(0.0, if sub.is_some() { 0.0 } else { 4.0 }), label, sub);
+        // The buttons sit below the label, so the description has the whole row to itself.
+        self.label_fit(lr.offset(0.0, if sub.is_some() { 0.0 } else { 4.0 }), label, sub, 16.0);
         self.segmented(cfg, R::new(r.x + 16.0, r.bottom() - 42.0, r.w - 32.0, 30.0), labels, f);
     }
 
@@ -147,8 +182,8 @@ impl Ui<'_, '_> {
     }
 
     pub(super) fn button(&mut self, r: R, label: &str, sub: Option<&str>, text: &str, act: Act, danger: bool) {
-        self.label(r, label, sub);
         let bw = self.cv.gfx.text_width(text, 12.5, 600) + 30.0;
+        self.label_fit(r, label, sub, bw + 32.0);
         let b = R::new(r.right() - 16.0 - bw, r.cy() - 14.0, bw, 28.0);
         self.s.hits.push((b, act));
         let base = if danger { C::hex(0xFF453A).a(0.2) } else { C::WHITE.a(0.1) };

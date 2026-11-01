@@ -12,14 +12,20 @@ mod feed;
 mod gfx;
 mod ical;
 mod lrc;
+mod localized;
+mod lyric_draw;
+mod lyric_style;
 mod lyrics;
+mod lyrics_cache;
 mod mascot;
 mod media;
+mod netease;
 mod notch;
 mod pages;
 mod pomodoro;
 mod profile;
 mod quiet;
+mod recent;
 mod settings;
 mod sound;
 mod stats;
@@ -27,6 +33,7 @@ mod store;
 mod sys;
 mod ticker;
 mod timers;
+mod tooltips;
 mod tray;
 mod update;
 mod views;
@@ -102,6 +109,10 @@ fn run() -> windows::core::Result<()> {
         art_color: None,
         lyrics: Vec::new(),
         lyrics_key: 0,
+        lyrics_source: None,
+        lyrics_translation: Vec::new(),
+        lyrics_romaji: Vec::new(),
+        recent: config::load_json("recent.json"),
         lyrics_requested: 0,
         lyrics_attempt: 0,
         shifts: config::load_json("lyrics.json"),

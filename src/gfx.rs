@@ -35,7 +35,6 @@ pub mod icon {
     pub const CALENDAR: char = '\u{E787}';
     pub const TIMER: char = '\u{E916}';
     pub const MUSIC: char = '\u{EC4F}';
-    pub const LYRICS: char = '\u{E8D2}';
     pub const FOLDER: char = '\u{E8B7}';
     pub const DOCUMENT: char = '\u{E8A5}';
     pub const WIFI: char = '\u{E701}';

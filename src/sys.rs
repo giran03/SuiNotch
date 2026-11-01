@@ -327,29 +327,127 @@ pub fn language_display_name() -> String {
 
 /// True when the foreground app covers the whole monitor (games, videos, slideshows).
 pub fn foreground_is_fullscreen(monitor: &RECT) -> bool {
+    fullscreen_blocker(monitor).is_some()
+}
+
+/// A window may miss covering the screen by this many pixels and still count as full screen.
+const COVER_SLACK_PX: i32 = 2;
+/// Windows that are never a game or video, even when they span the whole screen.
+const SHELL_CLASSES: [&str; 9] = [
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "XamlExplorerHostIslandWindow",
+    "MultitaskingViewFrame",
+    "TaskSwitcherWnd",
+    "ForegroundStaging",
+    "SuiNotchWindow",
+];
+
+/// What makes the notch step aside on `monitor`, in words, or None when nothing does. Besides Windows'
+/// own full-screen and presentation state, it looks at the topmost window that covers the monitor: a
+/// borderless one is a game or video filling the screen, whether or not it has focus, while a
+/// window with a title bar is just a maximised one.
+pub fn fullscreen_blocker(monitor: &RECT) -> Option<String> {
     unsafe {
-        if let Ok(state) = SHQueryUserNotificationState() {
-            if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
-                return true;
+        match SHQueryUserNotificationState() {
+            Ok(s) if s == QUNS_PRESENTATION_MODE => return Some("Windows is in presentation mode".to_string()),
+            Ok(s) if (s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_BUSY) && foreground_on(monitor) => {
+                return Some("Windows reports a full-screen app in front".to_string());
             }
+            _ => {}
         }
+    }
+    let mut scan = CoverScan { monitor: *monitor, found: None };
+    unsafe {
+        let _ = EnumWindows(Some(scan_window), LPARAM(&mut scan as *mut _ as isize));
+    }
+    scan.found.filter(|w| w.borderless).map(|w| format!("{} ({}) fills the screen", w.exe, w.class))
+}
+
+/// Whether the active window sits (by its centre) on this monitor.
+fn foreground_on(monitor: &RECT) -> bool {
+    unsafe {
         let fg = GetForegroundWindow();
-        if fg.0.is_null() || fg == GetDesktopWindow() || fg == GetShellWindow() {
-            return false;
-        }
-        let mut class = [0u16; 64];
-        let n = GetClassNameW(fg, &mut class);
-        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
-        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
-            return false;
-        }
         let mut r = RECT::default();
-        if GetWindowRect(fg, &mut r).is_err() {
+        if fg.0.is_null() || GetWindowRect(fg, &mut r).is_err() {
             return false;
         }
-        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
-        let borderless = style & WS_CAPTION.0 != WS_CAPTION.0;
-        borderless && r.left <= monitor.left && r.top <= monitor.top && r.right >= monitor.right && r.bottom >= monitor.bottom
+        let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        cx >= monitor.left && cx < monitor.right && cy >= monitor.top && cy < monitor.bottom
+    }
+}
+
+struct Covering {
+    exe: String,
+    class: String,
+    borderless: bool,
+}
+
+struct CoverScan {
+    monitor: RECT,
+    found: Option<Covering>,
+}
+
+/// Visits windows top to bottom and stops at the first that covers the monitor and is a real window.
+unsafe extern "system" fn scan_window(hwnd: HWND, data: LPARAM) -> BOOL {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    let scan = &mut *(data.0 as *mut CoverScan);
+    let m = scan.monitor;
+    let mut r = RECT::default();
+    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || GetWindowRect(hwnd, &mut r).is_err() {
+        return true.into();
+    }
+    let covers = r.left <= m.left + COVER_SLACK_PX && r.top <= m.top + COVER_SLACK_PX && r.right >= m.right - COVER_SLACK_PX && r.bottom >= m.bottom - COVER_SLACK_PX;
+    if !covers {
+        return true.into();
+    }
+    // Overlays (Discord, Steam, recorders) are click-through or never take focus; tool windows aren't apps.
+    let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0 | WS_EX_TRANSPARENT.0) != 0 {
+        return true.into();
+    }
+    let mut cloaked = 0u32;
+    let _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
+    if cloaked != 0 {
+        return true.into();
+    }
+    let mut buf = [0u16; 64];
+    let n = GetClassNameW(hwnd, &mut buf);
+    let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+    if SHELL_CLASSES.contains(&class.as_str()) {
+        return true.into();
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+        return true.into();
+    }
+    let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+    // A maximised app with its own title bar (Electron and the like) has no system caption either,
+    // but it is resizable; games and videos filling the screen are not.
+    let maximised_app = IsZoomed(hwnd).as_bool() && style & WS_THICKFRAME.0 != 0;
+    let borderless = style & WS_CAPTION.0 != WS_CAPTION.0 && !maximised_app;
+    scan.found = Some(Covering { exe: process_name(pid), class, borderless });
+    false.into()
+}
+
+/// File name of a process's program, or "unknown" when it can't be read.
+fn process_name(pid: u32) -> String {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return "unknown".to_string() };
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return "unknown".to_string();
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit(['\\', '/']).next().unwrap_or("unknown").to_string()
     }
 }
 
@@ -507,6 +605,26 @@ pub fn foreground_monitor() -> Option<String> {
             return None;
         }
         let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+        if hmon.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(hmon, &mut info as *mut _ as *mut MONITORINFO).as_bool() {
+            return None;
+        }
+        let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
+        Some(String::from_utf16_lossy(&info.szDevice[..len]))
+    }
+}
+
+/// Device name of the monitor under the mouse pointer.
+pub fn cursor_monitor() -> Option<String> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+    unsafe {
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt).ok()?;
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
         if hmon.is_invalid() {
             return None;
         }

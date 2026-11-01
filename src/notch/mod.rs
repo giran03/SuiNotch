@@ -38,7 +38,9 @@ pub use render::*;
 
 pub const FLARE: f32 = 9.0;
 pub const SHADOW: f32 = 22.0;
-pub const PILL_SPACE: f32 = 40.0;
+/// Closed notch with a lyric line inside it: the artwork and equalizer take this much beside the text.
+const IN_NOTCH_CHROME: f32 = 88.0;
+const MAX_IN_NOTCH_W: f32 = 560.0;
 /// Largest notch outline (the Calendar / lyrics pages), used to size the drawing buffer once.
 const MAX_NOTCH_W: f32 = 700.0;
 const MAX_NOTCH_H: f32 = 280.0;
@@ -51,6 +53,9 @@ const T_LEAVE: usize = 3;
 const T_SCHED: usize = 4;
 const T_IDLE: usize = 5;
 const T_DEMO: usize = 6;
+/// Checks which monitor the mouse is on, while "Follow the mouse" is chosen.
+const T_CURSOR: usize = 8;
+const CURSOR_POLL_MS: u32 = 500;
 
 const LEAVE_DELAY_MS: u32 = 380;
 const ALERT_TIMEOUT: Duration = Duration::from_secs(25);
@@ -75,16 +80,38 @@ pub struct Notch {
     pub pill_alpha: Spring,
     pub pill_line: Option<usize>,
     pub line_fade: Spring,
+    /// Height of the lyric pill under the notch; it grows when the song has a second line to show.
+    pub pill_h: Spring,
+    /// When the line on show appeared, for scrolling a long one.
+    pub line_since: Instant,
+    /// The line on show is wider than the most that is drawn, so it scrolls, shrinks or is cut.
+    pub pill_overflow: bool,
     pub expanded: bool,
     pub hovering: bool,
     pub hud: Option<(Hud, Instant)>,
     pub alert: Option<(AlertKind, Instant)>,
     pub hits: Vec<(R, Hit)>,
     pub hover: Option<Hit>,
+    /// The button a tooltip is waiting for or showing, and when the pointer arrived on it.
+    tip_for: Option<Hit>,
+    tip_since: Instant,
+    /// A tooltip was showing when the pointer moved on, so the next one appears at once.
+    tip_warm: bool,
+    /// When a waiting tooltip is due, so a frame is drawn exactly then.
+    tip_ready_at: Option<Instant>,
+    pub tip_text: String,
+    /// Shown under its button rather than above it, for buttons near the top edge.
+    pub tip_below: bool,
+    pub tip_alpha: Spring,
+    /// Where the tooltip points: the button's centre, and the edge of the tooltip nearest to it.
+    pub tip_x: Spring,
+    pub tip_y: Spring,
     pub pressed: Option<(Hit, f32, f32)>,
     pub mouse: (f32, f32),
     pub field: Option<TextField>,
     pub lyrics_view: bool,
+    /// The side panel shows recently played songs instead of lyrics.
+    pub recent_view: bool,
     pub volume_open: Spring,
     pub vol_drag: bool,
     pub seek_drag: Option<f32>,
@@ -174,16 +201,29 @@ impl Notch {
             pill_alpha: Spring::new(0.0, 0.3, 1.0),
             pill_line: None,
             line_fade: Spring::new(1.0, 0.28, 1.0),
+            pill_h: Spring::new(26.0, 0.3, 0.9),
+            line_since: Instant::now(),
+            pill_overflow: false,
             expanded: false,
             hovering: false,
             hud: None,
             alert: None,
             hits: Vec::new(),
             hover: None,
+            tip_for: None,
+            tip_since: Instant::now(),
+            tip_warm: false,
+            tip_ready_at: None,
+            tip_text: String::new(),
+            tip_below: false,
+            tip_alpha: Spring::new(0.0, 0.25, 1.0),
+            tip_x: Spring::new(0.0, 0.3, 0.9),
+            tip_y: Spring::new(0.0, 0.3, 0.9),
             pressed: None,
             mouse: (-1.0, -1.0),
             field: None,
             lyrics_view: cfg.lyrics_auto,
+            recent_view: false,
             volume_open: Spring::new(0.0, 0.3, 1.0),
             vol_drag: false,
             seek_drag: None,
@@ -239,7 +279,7 @@ impl Notch {
     }
 
     /// The first MORPH_SPRINGS change the notch outline or slide pages; the rest are small fades.
-    fn springs(&mut self) -> [&mut Spring; 15] {
+    fn springs(&mut self) -> [&mut Spring; 19] {
         [
             &mut self.w,
             &mut self.h,
@@ -256,6 +296,10 @@ impl Notch {
             &mut self.shelf_clear,
             &mut self.todo_scroll,
             &mut self.water_fill,
+            &mut self.tip_alpha,
+            &mut self.tip_x,
+            &mut self.tip_y,
+            &mut self.pill_h,
         ]
     }
 }
@@ -280,13 +324,16 @@ fn target_shape(app: &App) -> (f32, f32, f32) {
         }
     } else if n.expanded || n.drag_over {
         let page = n.shown_page();
-        let (w, h) = page.size(n.lyrics_view && page == Page::Music);
+        let (w, h) = page.size((n.lyrics_view || n.recent_view) && page == Page::Music);
         (w, h, 30.0)
     } else if app.cfg.minimal && !has_activity(app) {
         (170.0, 5.0, 2.5)
     } else if app.media.is_some() {
-        // Wide enough for the artwork, the song title and the equalizer.
-        (360.0, 32.0, 13.0)
+        // Wide enough for the artwork, the song title and the equalizer; a lyric line shown inside
+        // the notch widens it further.
+        let in_notch = !app.cfg.lyric_look().below_notch() && n.pill_alpha.target > 0.5;
+        let lyric_w = if in_notch { n.pill_w.target - 34.0 + IN_NOTCH_CHROME } else { 0.0 };
+        (lyric_w.clamp(360.0, MAX_IN_NOTCH_W), 32.0, 13.0)
     } else if app.focus_running() {
         (250.0, 32.0, 13.0)
     } else {
@@ -438,8 +485,15 @@ pub fn config_changed(app: &mut App, old: &Config) {
     app.notch.radius.tune(r, z.max(0.9));
     app.notch.gap.tune(r, 1.0);
     app.notch.open.tune(r * 0.9, 1.0);
-    if old.display != app.cfg.display || old.size != app.cfg.size || old.display_follow != app.cfg.display_follow {
+    if old.display != app.cfg.display
+        || old.size != app.cfg.size
+        || old.display_follow != app.cfg.display_follow
+        || old.display_follow_mouse != app.cfg.display_follow_mouse
+    {
         relocate(app);
+    }
+    if old.display_follow_mouse != app.cfg.display_follow_mouse {
+        sync_cursor_timer(app);
     }
     if old.hidden_pages != app.cfg.hidden_pages || old.clipboard_history != app.cfg.clipboard_history {
         leave_hidden_page(app);
@@ -453,6 +507,13 @@ pub fn config_changed(app: &mut App, old: &Config) {
     if old.clipboard_history && !app.cfg.clipboard_history {
         // Turning history off also forgets what was kept.
         app.clips.clear();
+    }
+    // Romaji or a translation was just asked for: songs from LRCLIB lack them, so look the one on
+    // screen up again, keeping its lines on show meanwhile.
+    if !old.wants_lyric_extras() && app.cfg.wants_lyric_extras() && app.lyrics_translation.is_empty() && app.lyrics_romaji.is_empty() {
+        if let Some(info) = app.media.as_ref().filter(|_| !app.lyrics.is_empty()).map(|m| m.info.clone()) {
+            crate::lyrics::fetch(info, 0, crate::lyrics::Options::from_config(&app.cfg));
+        }
     }
     check_fullscreen(app);
     schedule(app);
@@ -483,13 +544,53 @@ fn leave_hidden_page(app: &mut App) {
     app.notch.page = next.copied().unwrap_or(shown[0]);
 }
 
+/// With "Follow the mouse", moves the notch to the monitor the pointer has rested on. It waits for two
+/// checks in a row so crossing a screen on the way elsewhere doesn't make the notch jump, and it
+/// stays put while open or being dragged over.
+fn follow_mouse(app: &mut App) {
+    thread_local! {
+        static CANDIDATE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    let n = &app.notch;
+    if !app.cfg.display_follow_mouse || n.expanded || n.drag_over || n.own_drag {
+        CANDIDATE.with(|c| *c.borrow_mut() = None);
+        return;
+    }
+    let under = sys::cursor_monitor();
+    let settled = CANDIDATE.with(|c| {
+        let mut c = c.borrow_mut();
+        let same = *c == under;
+        *c = under.clone();
+        same
+    });
+    if let (true, Some(device)) = (settled, under) {
+        if device != app.notch.monitor.device {
+            app.notch.follow = Some(device);
+            relocate(app);
+        }
+    }
+}
+
+/// Runs the mouse-following check only while that option is on.
+fn sync_cursor_timer(app: &App) {
+    unsafe {
+        if app.cfg.display_follow_mouse {
+            SetTimer(Some(app.notch.hwnd), T_CURSOR, CURSOR_POLL_MS, None);
+        } else {
+            let _ = KillTimer(Some(app.notch.hwnd), T_CURSOR);
+        }
+    }
+}
+
 pub fn relocate(app: &mut App) {
-    let follow = if app.cfg.display_follow { app.notch.follow.clone() } else { None };
+    let follow = if app.cfg.display_follow || app.cfg.display_follow_mouse { app.notch.follow.clone() } else { None };
     if let Some(m) = sys::pick_monitor(crate::profile::display_override().or(follow).or(app.cfg.display.clone()).as_deref()) {
         app.notch.scale = monitor_scale(&app.cfg, &m);
         crate::ticker::set_monitor(&m.device);
         app.notch.monitor = m;
     }
+    // The new screen may or may not have a full-screen app on it.
+    check_fullscreen(app);
     request_frame(app);
 }
 
@@ -551,6 +652,7 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
                 T_SCHED => on_schedule(app),
                 T_DEMO => demo_step(app),
                 T_IDLE => on_idle_check(app),
+                T_CURSOR => follow_mouse(app),
                 id => timer_hook(app, id),
             }
             Some(LRESULT(0))
@@ -688,6 +790,10 @@ pub fn on_lang_timer(app: &mut App) {
 
 fn on_idle_check(app: &mut App) {
     app.clips.heartbeat(store::now());
+    // A game can go full screen without any focus change, so look again now and then.
+    if app.cfg.hide_fullscreen {
+        check_fullscreen(app);
+    }
     let idle = sys::idle_seconds();
     let was = app.notch.idle_mode;
     app.notch.idle_mode = idle >= IDLE_MASCOT_S || (was && app.notch.mascot.mood != crate::mascot::Mood::Awake);
@@ -714,6 +820,7 @@ pub fn start(app: &mut App) {
     unsafe {
         SetTimer(Some(app.notch.hwnd), T_IDLE, 2000, None);
     }
+    sync_cursor_timer(app);
     // No reminder the instant the app starts; the first one waits a few minutes.
     let grace = store::now() + STARTUP_GRACE_S;
     app.water.snoozed_until = Some(app.water.snoozed_until.map_or(grace, |s| s.max(grace)));

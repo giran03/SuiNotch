@@ -150,8 +150,14 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
                 app.lyrics_requested = key;
                 app.lyrics_attempt = 0;
                 app.lyrics.clear();
+                app.lyrics_translation.clear();
+                app.lyrics_romaji.clear();
                 app.lyrics_key = 0;
-                crate::lyrics::fetch(info.clone(), 0);
+                app.lyrics_source = None;
+                crate::lyrics::fetch(info.clone(), 0, crate::lyrics::Options::from_config(&app.cfg));
+                if app.recent.played(&info.title, &info.artist, store::now()) {
+                    crate::config::save_json("recent.json", &app.recent);
+                }
             }
             app.media = Some(app::Media { info, at: Instant::now() });
             true
@@ -162,9 +168,19 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
             app.notch.art = None;
             true
         }
-        Event::Lyrics { key, lines } => {
+        Event::Lyrics { key, found } => {
             if app.media.as_ref().is_some_and(|m| m.info.track_key() == key) {
-                app.lyrics = lines;
+                app.lyrics_source = found.as_ref().map(|f| (f.source, f.synced));
+                let found = found.unwrap_or(crate::lyrics::Found {
+                    lines: Vec::new(),
+                    source: crate::lyrics::Source::Lrclib,
+                    synced: false,
+                    translation: Vec::new(),
+                    romaji: Vec::new(),
+                });
+                app.lyrics = found.lines;
+                app.lyrics_translation = found.translation;
+                app.lyrics_romaji = found.romaji;
                 app.lyrics_key = key;
             }
             true

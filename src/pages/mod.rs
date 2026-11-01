@@ -61,6 +61,15 @@ fn empty_state(cv: &Canvas, area: R, title: &str, sub: &str) {
 
 // ------------------------------------------------------------------ music
 
+/// How far the left-hand icons reach from the text column's left edge: lyrics and recent, and with
+/// the player switch (and its count badge) as well.
+const LEFT_ICONS: f32 = 52.0;
+const LEFT_ICONS_WITH_SWITCH: f32 = 84.0;
+/// Half the width of previous, play and next together (the outer buttons at 44 px plus their reach).
+const TRANSPORT_HALF: f32 = 60.0;
+/// Room the volume button takes at the right end of the row.
+const VOLUME_ROOM: f32 = 26.0;
+
 pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     let Some(m) = app.media.as_ref() else {
         empty_state(cv, area, "Nothing playing", "Play something in Spotify, Apple Music or your browser");
@@ -69,6 +78,8 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     let info = m.info.clone();
     let pos = app.notch.seek_drag.map(|f| (f * info.duration_ms as f32) as u64).unwrap_or_else(|| m.position_ms());
     let lyrics_view = app.notch.lyrics_view;
+    let recent_view = app.notch.recent_view;
+    let side_panel = lyrics_view || recent_view;
     let accent = accent(app);
     let tint = app.art_color.unwrap_or(accent);
 
@@ -77,7 +88,7 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
         cv.fill_rrect(art, 14.0, C::WHITE.a(0.08));
         cv.glyph(icon::MUSIC, art.cx(), art.cy(), 30.0, SUBTLE);
     }
-    let info_w = if lyrics_view { area.w - 118.0 - 268.0 } else { area.w - 118.0 };
+    let info_w = if side_panel { area.w - 118.0 - 268.0 } else { area.w - 118.0 };
     let x0 = art.right() + 18.0;
     cv.display(&info.title, R::new(x0, area.y + 2.0, info_w, 22.0), 16.0, 700, C::WHITE, Align::Left);
     cv.text(&info.artist, R::new(x0, area.y + 25.0, info_w, 18.0), 12.5, 500, DIM, Align::Left);
@@ -101,7 +112,11 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
 
     // Controls
     let cy = area.bottom() - 16.0;
-    let cx = x0 + info_w / 2.0;
+    // The transport buttons centre in the row, but never closer to the left icons (lyrics, recent,
+    // player switch) or the volume button than their own width, so a narrow page can't make them overlap.
+    let left_end = if info.sources > 1 { LEFT_ICONS_WITH_SWITCH } else { LEFT_ICONS };
+    let (lo, hi) = (x0 + left_end + TRANSPORT_HALF, x0 + info_w - VOLUME_ROOM - TRANSPORT_HALF);
+    let cx = (x0 + info_w / 2.0).clamp(lo, hi.max(lo));
     icon_button(cv, app, cx - 44.0, cy, 14.0, icon::PREV, Hit::Prev, C::WHITE);
     let play_hit = Hit::PlayPause;
     hit(app, R::centered(cx, cy, 40.0, 40.0), play_hit);
@@ -110,14 +125,58 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     cv.glyph(if info.playing { icon::PAUSE } else { icon::PLAY }, cx + if info.playing { 0.0 } else { 1.0 }, cy, 14.0, C::BLACK);
     icon_button(cv, app, cx + 44.0, cy, 14.0, icon::NEXT, Hit::Next, C::WHITE);
     let lyr_color = if lyrics_view { tint.mix(C::WHITE, 0.3) } else { DIM };
-    icon_button(cv, app, x0 + 10.0, cy, 12.0, icon::LYRICS, Hit::LyricsToggle, lyr_color);
+    views::icon_button_with(cv, app, x0 + 10.0, cy, 12.0, Hit::LyricsToggle, |cv, s| views::lyrics_glyph(cv, x0 + 10.0, cy, s, lyr_color));
+    let recent_color = if recent_view { tint.mix(C::WHITE, 0.3) } else { DIM };
+    icon_button(cv, app, x0 + 36.0, cy, 12.0, '\u{E81C}', Hit::RecentToggle, recent_color);
     if info.sources > 1 {
-        source_toggle(cv, app, x0 + 40.0, cy, info.sources);
+        source_toggle(cv, app, x0 + 64.0, cy, info.sources);
     }
     volume_control(cv, app, x0 + info_w - 10.0, cy);
 
+    let panel = R::new(area.right() - 252.0, area.y - 6.0, 252.0, area.h + 8.0);
     if lyrics_view {
-        lyrics_panel(cv, app, R::new(area.right() - 252.0, area.y - 6.0, 252.0, area.h + 8.0), tint);
+        lyrics_panel(cv, app, panel, tint);
+    } else if recent_view {
+        recent_panel(cv, app, panel, tint);
+    }
+}
+
+/// Songs played lately, newest first; the one playing now is marked and a click copies a name.
+fn recent_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
+    const ROW_H: f32 = 34.0;
+    cv.fill_rrect(r, 16.0, C::WHITE.a(0.05));
+    let inner = r.inset(16.0, 10.0);
+    cv.text("Recently played", R::new(inner.x, inner.y, inner.w, 18.0), 11.5, 600, DIM, Align::Left);
+    if app.recent.items.is_empty() {
+        cv.text("Songs you play show up here", R::new(inner.x, inner.cy() - 8.0, inner.w, 20.0), 12.5, 500, DIM, Align::Center);
+        return;
+    }
+    let playing = app.media.as_ref().map(|m| (m.info.title.clone(), m.info.artist.clone()));
+    let now = store::now();
+    let rows = (((inner.h - 24.0) / ROW_H).floor() as usize).min(app.recent.items.len());
+    for i in 0..rows {
+        let p = app.recent.items[i].clone();
+        let row = R::new(inner.x, inner.y + 24.0 + i as f32 * ROW_H, inner.w, ROW_H - 2.0);
+        hit(app, row, Hit::Recent(i));
+        if hovered(app, Hit::Recent(i)) {
+            cv.fill_rrect(row.inset(-6.0, 0.0), 8.0, FAINT);
+        }
+        let current = playing.as_ref().is_some_and(|(t, a)| *t == p.title && *a == p.artist);
+        let ago = if current { "now".to_string() } else { ago(now - p.at) };
+        cv.text(&ago, R::new(row.right() - 34.0, row.y, 34.0, 16.0), 10.5, 600, if current { tint.mix(C::WHITE, 0.45) } else { DIM }, Align::Right);
+        let title_color = if current { tint.mix(C::WHITE, 0.45) } else { C::WHITE };
+        cv.text(&p.title, R::new(row.x, row.y, row.w - 40.0, 17.0), 12.5, if current { 700 } else { 550 }, title_color, Align::Left);
+        cv.text(&p.artist, R::new(row.x, row.y + 16.0, row.w, 15.0), 11.0, 500, DIM, Align::Left);
+    }
+}
+
+/// "5m", "3h", "2d": how long ago, in the shortest form.
+fn ago(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => "now".into(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
     }
 }
 
@@ -133,14 +192,24 @@ fn volume_control(cv: &mut Canvas, app: &mut App, x: f32, cy: f32) {
     let Some(audio) = app.audio.as_ref() else { return };
     let (level, muted) = audio.get();
     let open = app.notch.volume_open.value.clamp(0.0, 1.0);
-    let w = 96.0 * open;
     if open > 0.02 {
-        let r = R::new(x - 16.0 - w, cy - 2.5, w, 5.0);
+        // A vertical flyout above the icon, so it never slides over the transport buttons.
+        // The hit area runs down to the icon so hover carries over; `volume_bar_rect` derives the track from it.
+        let hit_r = R::new(x - 14.0, cy - 86.0, 28.0, 82.0);
+        hit(app, hit_r, Hit::VolumeBar);
+        let pill = R::new(hit_r.x, hit_r.y, hit_r.w, 72.0);
+        let track = views::volume_bar_rect(app).unwrap_or(pill);
+        let frac = if muted { 0.0 } else { level.clamp(0.0, 1.0) };
+        let knob_y = track.bottom() - track.h * frac;
         cv.push_opacity(open);
-        bar(cv, r, if muted { 0.0 } else { level }, C::WHITE);
-        cv.fill_circle(r.x + r.w * if muted { 0.0 } else { level }, r.cy(), 5.0, C::WHITE);
+        cv.fill_rrect(pill, 14.0, C::BLACK);
+        cv.fill_rrect(pill, 14.0, C::WHITE.a(0.10));
+        cv.fill_rrect(track, track.w / 2.0, C::WHITE.a(0.16));
+        if frac > 0.0 {
+            cv.fill_rrect(R::new(track.x, knob_y, track.w, track.bottom() - knob_y), track.w / 2.0, C::WHITE);
+        }
+        cv.fill_circle(track.cx(), knob_y, 5.0, C::WHITE);
         cv.pop();
-        hit(app, R::new(r.x - 6.0, cy - 12.0, r.w + 12.0, 24.0), Hit::VolumeBar);
     }
     let g = if muted || level <= 0.001 { icon::MUTE } else { icon::VOLUME };
     icon_button(cv, app, x, cy, 12.0, g, Hit::Volume, DIM);
@@ -162,7 +231,10 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
     }
     let cur = app.current_line();
     let center = cur.unwrap_or(0) as isize;
-    let row = 27.0;
+    // With romaji or a translation on, each line takes a taller row to hold it.
+    let alt_mode = app.cfg.lyrics_panel_alt;
+    let alt_on = alt_mode > 0 && !alt_lines(app, alt_mode).is_empty();
+    let row = if alt_on { 44.0 } else { 27.0 };
     let mid = inner.cy() - row / 2.0;
     cv.push_clip_rrect(r, 16.0, 1.0);
     for k in -3isize..=3 {
@@ -181,12 +253,33 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
         }
         let text = if line.text.is_empty() { "\u{266A}" } else { &line.text };
         let (size, weight, color) = if is_cur { (14.0, 700, tint.mix(C::WHITE, 0.45)) } else { (12.5, 500, C::WHITE.a(0.42 * fade)) };
-        cv.text(text, lr, size, weight, color, Align::Left);
+        if alt_on {
+            cv.text(text, R::new(lr.x, lr.y, lr.w, 24.0), size, weight, color, Align::Left);
+            if let Some(alt) = app.alt_line(i as usize, alt_mode == 1) {
+                let a = if is_cur { 0.7 } else { 0.32 * fade };
+                cv.text(&alt, R::new(lr.x, lr.y + 22.0, lr.w, 18.0), 11.0, 500, C::WHITE.a(a), Align::Left);
+            }
+        } else {
+            cv.text(text, lr, size, weight, color, Align::Left);
+        }
     }
     cv.pop();
     let (mx, my) = app.notch.mouse;
     if r.contains(mx, my) {
         lyrics_tools(cv, app, r);
+    } else if let Some((source, synced)) = app.lyrics_source {
+        // Which service the lyrics came from, and whether the timing is real or an even spread.
+        let tag = format!("{} · {}", source.name(), if synced { "synced" } else { "unsynced" });
+        cv.text(&tag, R::new(r.x + 16.0, r.bottom() - 22.0, r.w - 32.0, 14.0), 10.0, 600, C::WHITE.a(0.3), Align::Left);
+    }
+}
+
+/// The romanised (mode 1) or translated (mode 2) lines of the song on screen.
+fn alt_lines(app: &App, mode: usize) -> &[crate::lrc::Line] {
+    if mode == 1 {
+        &app.lyrics_romaji
+    } else {
+        &app.lyrics_translation
     }
 }
 
@@ -199,6 +292,16 @@ fn lyrics_tools(cv: &Canvas, app: &mut App, r: R) {
     let label = if shift == 0 { "In sync".to_string() } else { format!("{:+.1} s", shift as f32 / 1000.0) };
     cv.text(&label, R::new(bar.x + 28.0, bar.y, 58.0, bar.h), 11.0, 650, DIM, Align::Center);
     icon_button(cv, app, bar.x + 98.0, bar.cy(), 8.0, icon::ADD, Hit::LyricsLater, C::WHITE);
+    // Only offered when the song has romaji or a translation to show.
+    if !app.lyrics_romaji.is_empty() || !app.lyrics_translation.is_empty() {
+        let mode = app.cfg.lyrics_panel_alt;
+        let chip = R::centered(bar.x + 124.0, bar.cy(), 30.0, 20.0);
+        hit(app, chip, Hit::LyricsAlt);
+        let fill = if mode > 0 { 0.22 } else if hovered(app, Hit::LyricsAlt) { 0.14 } else { 0.08 };
+        cv.fill_rrect(chip, 10.0, C::WHITE.a(fill));
+        let label = ["Aあ", "Ro", "Tr"][mode.min(2)];
+        cv.text(label, chip, 10.5, 650, if mode > 0 { C::WHITE } else { DIM }, Align::Center);
+    }
     let w = app.gfx.text_width("Search again", 12.5, 600) + 24.0;
     pill_button(cv, app, R::new(bar.right() - w - 3.0, bar.y + 3.0, w, bar.h - 6.0), "Search again", Hit::LyricsRetry, false);
 }

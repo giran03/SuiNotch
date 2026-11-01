@@ -20,6 +20,9 @@ use crate::stats::Stats;
 use crate::store::{self, Shelf, Todos, Water};
 use crate::sys::Audio;
 
+/// A translated or romanised line counts as the same line when it starts this close to the original.
+const ALT_TOLERANCE_MS: u64 = 1500;
+
 pub struct Media {
     pub info: MediaInfo,
     /// When `info.position_ms` was sampled, to extrapolate playback position.
@@ -52,6 +55,13 @@ pub struct App {
     pub art_color: Option<C>,
     pub lyrics: Vec<Line>,
     pub lyrics_key: u64,
+    /// Where the lyrics on screen came from and whether they are timed; None while there are none.
+    pub lyrics_source: Option<(crate::lyrics::Source, bool)>,
+    /// The lyrics in another language and in Latin letters, when the source has them.
+    pub lyrics_translation: Vec<Line>,
+    pub lyrics_romaji: Vec<Line>,
+    /// Songs played lately, newest first.
+    pub recent: crate::recent::Recent,
     /// Track whose lyrics were last requested, so each song is looked up once.
     pub lyrics_requested: u64,
     /// "Search again" presses for the current song.
@@ -195,6 +205,35 @@ impl App {
         self.pomo.durations_changed(&durations(&old), &durations(&self.cfg));
         self.save_config();
         crate::notch::config_changed(self, &old);
+    }
+
+    /// The romanised or translated text that goes with lyric line `i`, if the song has it.
+    pub fn alt_line(&self, i: usize, romaji: bool) -> Option<String> {
+        let (alt, line) = (if romaji { &self.lyrics_romaji } else { &self.lyrics_translation }, self.lyrics.get(i)?);
+        crate::lrc::line_at(alt, line.at_ms, ALT_TOLERANCE_MS).map(|l| l.text.clone()).filter(|t| !t.is_empty())
+    }
+
+    /// What the pill shows under lyric line `i`, as the Second line setting says; None when there is nothing to show.
+    pub fn second_line(&self, i: usize) -> Option<String> {
+        match self.cfg.lyrics_second {
+            1 => self.lyrics.get(i + 1).map(|l| l.text.clone()).filter(|t| !t.is_empty()),
+            2 => self.alt_line(i, true),
+            3 => self.alt_line(i, false),
+            4 => self.alt_line(i, false).or_else(|| self.alt_line(i, true)),
+            _ => None,
+        }
+    }
+
+    /// Whether the song on screen has what the Second line setting asks for, so the pill makes room
+    /// for it. Decided for the whole song, so the pill does not jump between lines that lack it.
+    pub fn has_second_line(&self) -> bool {
+        match self.cfg.lyrics_second {
+            1 => self.lyrics.len() > 1,
+            2 => !self.lyrics_romaji.is_empty(),
+            3 => !self.lyrics_translation.is_empty(),
+            4 => !self.lyrics_translation.is_empty() || !self.lyrics_romaji.is_empty(),
+            _ => false,
+        }
     }
 
     pub fn current_line(&self) -> Option<usize> {
