@@ -2,8 +2,9 @@
 //! code as the real one, replaying a sample line so every choice can be seen as it is made.
 
 use super::*;
-use crate::lyric_draw::{self, Frame};
+use crate::lyric_draw::{self, Fill, Frame};
 use crate::lyric_style::Enter;
+use crate::words;
 
 /// Height of the preview's row.
 pub(super) const ROW_PREVIEW: f32 = 120.0;
@@ -14,10 +15,76 @@ const SAMPLE: &str = "A line of the song, as it is sung";
 const SAMPLE_SECOND: [&str; 5] = ["", "The next line of the song", "A romanised line", "A translated line", "A translated line"];
 /// The sample replays over this many seconds.
 const LOOP_S: f32 = 4.0;
+/// When the sample line starts to be sung, and how long it takes, in the preview.
+const SING_START_MS: u64 = 400;
+const SING_MS: u64 = 2800;
 /// How long a new line takes to arrive in the preview.
 const ENTER_S: f32 = 0.9;
 
+/// Push the preview out with the end of Second line, before Now playing enters.
+pub(super) fn section_y(normal_y: f32, lyrics_end: f32, height: f32) -> f32 {
+    normal_y.max(TITLE_H).min(lyrics_end - height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_stays_in_flow_until_it_reaches_the_top() {
+        assert_eq!(section_y(200.0, 1400.0, 160.0), 200.0);
+        assert_eq!(section_y(-100.0, 1000.0, 160.0), TITLE_H);
+        assert_eq!(section_y(-200.0, 900.0, 160.0), TITLE_H);
+    }
+
+    #[test]
+    fn preview_leaves_before_now_playing() {
+        assert_eq!(section_y(-1000.0, TITLE_H + 80.0, 160.0), TITLE_H - 80.0);
+        let end = TITLE_H - 8.0;
+        assert_eq!(section_y(-1200.0, end, 160.0) + 160.0, end);
+    }
+
+    #[test]
+    fn preview_returns_and_stays_pinned_when_scrolling_up() {
+        let upward_positions = [(-1200.0, 20.0), (-1000.0, 220.0), (-800.0, 420.0), (-100.0, 1120.0)];
+        let positions: Vec<f32> = upward_positions.iter()
+            .map(|&(normal, end)| section_y(normal, end, 160.0))
+            .collect();
+        assert_eq!(positions, vec![-140.0, TITLE_H, TITLE_H, TITLE_H]);
+        assert_eq!(section_y(60.0, 1280.0, 160.0), 60.0);
+    }
+}
+
 impl Ui<'_, '_> {
+    pub(super) fn lyric_preview_section(&mut self, c: &Config, r: R) {
+        // Cover the padding up to the page's clip edge too, so scrolling text
+        // cannot peek through the strip above the pinned section label.
+        let top = (r.y - 8.0).max(TITLE_H - 8.0);
+        if r.bottom() <= top || r.y >= H {
+            return;
+        }
+        // The backdrop spans the content column, including the card margins.
+        self.cv.fill_rect(R::new(SIDEBAR + 1.0, top, W - SIDEBAR - 1.0, r.bottom() - top), BG);
+        self.cv.text("Lyrics preview", R::new(r.x + 4.0, r.y, r.w, 18.0), 12.0, 600, DIM, Align::Left);
+        let card = R::new(r.x, r.y + 22.0, r.w, ROW_PREVIEW);
+        self.cv.fill_rrect(card, 12.0 * self.round, CARD);
+        self.lyric_preview(c, card);
+        // Clip covered hit areas as well as painting over them. Partly exposed
+        // controls remain usable below the preview, with no clicks through it.
+        self.s.hits.retain_mut(|(hit, _)| {
+            if hit.right() <= SIDEBAR || hit.bottom() <= top || hit.y >= r.bottom() {
+                return true;
+            }
+            let bottom = hit.bottom();
+            hit.y = r.bottom();
+            hit.h = (bottom - hit.y).max(0.0);
+            hit.h > 0.0
+        });
+        self.s.hover = self.s.hits.iter().rev()
+            .find(|(hit, _)| hit.contains(self.s.mouse.0, self.s.mouse.1))
+            .map(|(_, act)| *act);
+    }
+
     pub(super) fn lyric_preview(&mut self, c: &Config, r: R) {
         let look = c.lyric_look();
         let stage = R::new(r.x + 16.0, r.y + 10.0, r.w - 32.0, r.h - 20.0);
@@ -32,7 +99,13 @@ impl Ui<'_, '_> {
             second,
             look,
             fade,
-            sung: ((t - 0.4) / (LOOP_S - 1.2)).clamp(0.0, 1.0),
+            fill: if look.words {
+                // Words are timed as an estimate, the way a song without word timing is shown.
+                let words = words::estimate(SAMPLE, SING_START_MS, SING_MS);
+                Fill::Chars(words::sung_chars(&words, (t * 1000.0) as u64))
+            } else {
+                Fill::Even(((t - 0.4) / (LOOP_S - 1.2)).clamp(0.0, 1.0))
+            },
             secs: t,
             art: None,
             accent,

@@ -21,7 +21,7 @@ use crate::events::{self, Event};
 use crate::gfx::{self, Canvas, C, R};
 use crate::mascot::Mascot;
 use crate::pomodoro::Phase;
-use crate::sound::{self, Chime};
+use crate::sound;
 use crate::store;
 use crate::sys::{self, Monitor};
 use crate::views;
@@ -30,11 +30,13 @@ mod input;
 mod kinds;
 mod reminders;
 mod render;
+mod tasks;
 
 pub use input::*;
 pub use kinds::*;
 pub use reminders::*;
 pub use render::*;
+pub use tasks::*;
 
 pub const FLARE: f32 = 9.0;
 pub const SHADOW: f32 = 22.0;
@@ -109,6 +111,12 @@ pub struct Notch {
     pub pressed: Option<(Hit, f32, f32)>,
     pub mouse: (f32, f32),
     pub field: Option<TextField>,
+    /// The task editor hidden temporarily while entering a reminder time.
+    pub time_return: Option<TextField>,
+    pub time_select_all: bool,
+    pub task_day: Option<NaiveDate>,
+    pub task_drafts: Vec<TaskDraft>,
+    pub task_error: Option<String>,
     pub lyrics_view: bool,
     /// The side panel shows recently played songs instead of lyrics.
     pub recent_view: bool,
@@ -160,6 +168,7 @@ impl Notch {
         let hwnd = unsafe {
             let hinst = GetModuleHandleW(None)?;
             let class = WNDCLASSW {
+                style: CS_DBLCLKS,
                 lpfnWndProc: Some(wndproc),
                 hInstance: hinst.into(),
                 lpszClassName: w!("SuiNotchWindow"),
@@ -222,6 +231,11 @@ impl Notch {
             pressed: None,
             mouse: (-1.0, -1.0),
             field: None,
+            time_return: None,
+            time_select_all: false,
+            task_day: None,
+            task_drafts: Vec::new(),
+            task_error: None,
             lyrics_view: cfg.lyrics_auto,
             recent_view: false,
             volume_open: Spring::new(0.0, 0.3, 1.0),
@@ -400,12 +414,13 @@ pub fn collapse(app: &mut App) {
     if !n.expanded {
         return;
     }
-    if n.field.is_some() {
+    cancel_time_edit(app);
+    if app.notch.field.as_ref().is_some_and(|f| matches!(f.target, EditTarget::Rename(_))) {
         commit_field(app);
+        app.notch.field = None;
     }
     let n = &mut app.notch;
     n.expanded = false;
-    n.field = None;
     n.due_edit = None;
     n.shelf_selecting = false;
     n.shelf_sel.clear();
@@ -417,7 +432,8 @@ pub fn collapse(app: &mut App) {
 
 pub fn set_page(app: &mut App, page: Page) {
     if app.notch.page != page {
-        if app.notch.field.is_some() {
+        cancel_time_edit(app);
+        if app.notch.field.as_ref().is_some_and(|f| matches!(f.target, EditTarget::Rename(_))) {
             commit_field(app);
             app.notch.field = None;
         }
@@ -450,17 +466,20 @@ pub fn show_hud(app: &mut App, hud: Hud) {
 }
 
 pub fn show_alert(app: &mut App, kind: AlertKind) {
+    // A timer remains actionable until acknowledged; a low-battery callback must not replace it.
+    if matches!(app.notch.alert, Some((AlertKind::Timer, _))) && kind != AlertKind::Timer { return; }
     app.notch.hud = None;
     app.notch.alert = Some((kind, Instant::now()));
     app.notch.h.kick(140.0);
-    if app.cfg.sounds && !(app.cfg.respect_quiet && crate::quiet::active()) {
-        sound::play(match kind {
-            AlertKind::Water => Chime::Drop,
-            AlertKind::Pomodoro(Phase::Focus) => Chime::Bell,
-            AlertKind::Pomodoro(_) => Chime::Soft,
-            _ => Chime::Bell,
-        });
-    }
+    sound::alert(&app.cfg, match kind {
+        AlertKind::Pomodoro(Phase::Focus) => 0,
+        AlertKind::Pomodoro(_) => 1,
+        AlertKind::Timer => 2,
+        AlertKind::Todo(_) => 3,
+        AlertKind::Event(_) => 4,
+        AlertKind::Water => 5,
+        AlertKind::LowBattery(_) => 6,
+    });
     request_frame(app);
 }
 
@@ -478,6 +497,7 @@ pub fn notice(app: &mut App, text: &str) {
 }
 
 pub fn config_changed(app: &mut App, old: &Config) {
+    if old.sounds != app.cfg.sounds || old.sound_library != app.cfg.sound_library || old.respect_quiet != app.cfg.respect_quiet { sound::stop(); }
     let (r, z) = app.cfg.animation();
     for s in [&mut app.notch.w, &mut app.notch.h] {
         s.tune(r, z);
@@ -508,9 +528,11 @@ pub fn config_changed(app: &mut App, old: &Config) {
         // Turning history off also forgets what was kept.
         app.clips.clear();
     }
-    // Romaji or a translation was just asked for: songs from LRCLIB lack them, so look the one on
-    // screen up again, keeping its lines on show meanwhile.
-    if !old.wants_lyric_extras() && app.cfg.wants_lyric_extras() && app.lyrics_translation.is_empty() && app.lyrics_romaji.is_empty() {
+    // Romaji, a translation or word timing was just asked for: songs from LRCLIB lack them, so look the
+    // one on screen up again, keeping its lines on show meanwhile.
+    let extras_now = !old.wants_lyric_extras() && app.cfg.wants_lyric_extras() && app.lyrics_translation.is_empty() && app.lyrics_romaji.is_empty();
+    let words_now = !old.wants_word_timing() && app.cfg.wants_word_timing() && app.lyrics_words.is_empty();
+    if extras_now || words_now {
         if let Some(info) = app.media.as_ref().filter(|_| !app.lyrics.is_empty()).map(|m| m.info.clone()) {
             crate::lyrics::fetch(info, 0, crate::lyrics::Options::from_config(&app.cfg));
         }
@@ -644,7 +666,8 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
                 }
                 T_LEAVE => {
                     unsafe { KillTimer(Some(app.notch.hwnd), T_LEAVE).ok() };
-                    let busy = app.notch.field.as_ref().is_some_and(|f| !f.text.is_empty()) || app.notch.own_drag || app.notch.drag_over;
+                    let editing = app.notch.page == Page::Todo && app.notch.field.as_ref().is_some_and(|f| !f.text.is_empty());
+                    let busy = editing || app.notch.own_drag || app.notch.drag_over;
                     if !app.notch.hovering && !busy {
                         collapse(app);
                     }
@@ -678,7 +701,11 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             on_button_up(app, x, y);
             Some(LRESULT(0))
         }
-        WM_LBUTTONDBLCLK => Some(LRESULT(0)),
+        WM_LBUTTONDBLCLK => {
+            let (x, y) = point(lparam, scale, app.notch.gap.value);
+            on_double_click(app, x, y);
+            Some(LRESULT(0))
+        }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
             let delta = ((wparam.0 >> 16) & 0xffff) as i16;
             let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 };
@@ -867,6 +894,7 @@ fn demo_step(app: &mut App) {
         collapse(app);
     } else {
         app.notch.alert = None;
+        sound::stop();
         expand(app);
     }
 }

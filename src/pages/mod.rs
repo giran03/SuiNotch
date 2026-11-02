@@ -50,6 +50,19 @@ pub fn draw_artwork(cv: &mut Canvas, app: &mut App, r: R, radius: f32) -> bool {
     }
 }
 
+/// The track artwork, or a placeholder in the accent colour when the player has none to give.
+pub fn draw_art(cv: &mut Canvas, app: &mut App, r: R, radius: f32) {
+    if draw_artwork(cv, app, r, radius) {
+        return;
+    }
+    let accent = accent(app);
+    cv.fill_rrect(r, radius, accent.mix(C::BLACK, 0.65));
+    if r.w >= 48.0 {
+        cv.fill_circle(r.cx(), r.cy(), r.w * 0.34, accent.a(0.22));
+    }
+    cv.glyph(icon::MUSIC, r.cx(), r.cy(), r.w * 0.42, accent.mix(C::WHITE, 0.55));
+}
+
 pub fn water_icon(cv: &Canvas, cx: f32, cy: f32, size: f32, c: C) {
     mascot::drop_shape(cv, cx, cy + size * 0.5, size * 0.72, size, c);
 }
@@ -84,10 +97,7 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     let tint = app.art_color.unwrap_or(accent);
 
     let art = R::new(area.x, area.y + 2.0, 100.0, 100.0);
-    if !draw_artwork(cv, app, art, 14.0) {
-        cv.fill_rrect(art, 14.0, C::WHITE.a(0.08));
-        cv.glyph(icon::MUSIC, art.cx(), art.cy(), 30.0, SUBTLE);
-    }
+    draw_art(cv, app, art, 14.0);
     let info_w = if side_panel { area.w - 118.0 - 268.0 } else { area.w - 118.0 };
     let x0 = art.right() + 18.0;
     cv.display(&info.title, R::new(x0, area.y + 2.0, info_w, 22.0), 16.0, 700, C::WHITE, Align::Left);
@@ -253,14 +263,18 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
         }
         let text = if line.text.is_empty() { "\u{266A}" } else { &line.text };
         let (size, weight, color) = if is_cur { (14.0, 700, tint.mix(C::WHITE, 0.45)) } else { (12.5, 500, C::WHITE.a(0.42 * fade)) };
+        // With the Words highlight, the line being sung fills word by word.
+        let sung = (is_cur && app.cfg.lyrics_highlight == 2).then(|| app.sung_chars(i as usize));
+        let main = if alt_on { R::new(lr.x, lr.y, lr.w, 24.0) } else { lr };
+        match sung {
+            Some(n) => crate::lyric_draw::draw_filled(cv, main, text, size, weight, color, n),
+            None => cv.text(text, main, size, weight, color, Align::Left),
+        }
         if alt_on {
-            cv.text(text, R::new(lr.x, lr.y, lr.w, 24.0), size, weight, color, Align::Left);
             if let Some(alt) = app.alt_line(i as usize, alt_mode == 1) {
                 let a = if is_cur { 0.7 } else { 0.32 * fade };
                 cv.text(&alt, R::new(lr.x, lr.y + 22.0, lr.w, 18.0), 11.0, 500, C::WHITE.a(a), Align::Left);
             }
-        } else {
-            cv.text(text, lr, size, weight, color, Align::Left);
         }
     }
     cv.pop();
@@ -269,7 +283,8 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
         lyrics_tools(cv, app, r);
     } else if let Some((source, synced)) = app.lyrics_source {
         // Which service the lyrics came from, and whether the timing is real or an even spread.
-        let tag = format!("{} · {}", source.name(), if synced { "synced" } else { "unsynced" });
+        let timing = if app.has_word_timing() { "word-synced" } else if synced { "synced" } else { "unsynced" };
+        let tag = format!("{} · {timing}", source.name());
         cv.text(&tag, R::new(r.x + 16.0, r.bottom() - 22.0, r.w - 32.0, 14.0), 10.0, 600, C::WHITE.a(0.3), Align::Left);
     }
 }
@@ -531,8 +546,15 @@ fn dashed_rrect(cv: &Canvas, r: R, radius: f32, c: C) {
 // ------------------------------------------------------------------ to-do
 
 pub fn visible_todos(app: &App) -> Vec<Todo> {
-    let mut v: Vec<Todo> = app.todos.items.iter().filter(|t| app.cfg.todo_show_done || !t.done).cloned().collect();
-    v.sort_by_key(|t| (t.done, t.due.is_none(), t.due.unwrap_or(i64::MAX)));
+    let mut v: Vec<Todo> = app.todos.items.iter()
+        .filter(|t| app.cfg.todo_show_done || !t.done)
+        .filter(|t| app.notch.task_day.is_none_or(|day| t.day() == Some(day)))
+        .cloned().collect();
+    if app.notch.task_day.is_some() {
+        v.sort_by_key(|t| (t.done, t.due.is_some(), t.due, t.id));
+    } else {
+        v.sort_by_key(|t| (t.done, t.due.is_none(), t.due.unwrap_or(i64::MAX)));
+    }
     v
 }
 
@@ -552,19 +574,43 @@ fn due_label(app: &App, due: i64, now: i64) -> String {
 
 pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
     let now = store::now();
-    let (done, total) = app.todos.today_progress(now);
+    let area = if let Some(day) = app.notch.task_day {
+        let date = day.format("%A, %-d %B %Y").to_string();
+        let label = if day == store::day_of(now) { format!("Today · {date}") } else { date };
+        cv.text(&label, R::new(area.x, area.y - 4.0, area.w - 194.0, 22.0), 13.0, 650, C::WHITE, Align::Left);
+        pill_button(cv, app, R::new(area.right() - 186.0, area.y - 4.0, 70.0, 22.0), "All tasks", Hit::TodoAll, false);
+        pill_button(cv, app, R::new(area.right() - 108.0, area.y - 4.0, 108.0, 22.0), "Back to Calendar", Hit::TodoCalendar, false);
+        R::new(area.x, area.y + 28.0, area.w, area.h - 28.0)
+    } else { area };
+    let (done, total) = if let Some(day) = app.notch.task_day {
+        let tasks = app.todos.on_day(day);
+        (tasks.iter().filter(|t| t.done).count(), tasks.len())
+    } else {
+        app.todos.today_progress(now)
+    };
     let accent = accent(app);
-    cv.text(&format!("{done}/{total} done today"), R::new(area.x, area.y - 2.0, 180.0, 20.0), 12.0, 500, DIM, Align::Left);
+    let progress = if app.notch.task_day.is_some() { format!("{done}/{total} done") } else { format!("{done}/{total} done today") };
+    let progress_x = if app.notch.task_day.is_some() {
+        icon_button(cv, app, area.x + 10.0, area.y + 8.0, 9.0, icon::LEFT, Hit::TodoDayStep(-1), DIM);
+        icon_button(cv, app, area.x + 36.0, area.y + 8.0, 9.0, icon::RIGHT, Hit::TodoDayStep(1), DIM);
+        area.x + 56.0
+    } else { area.x };
+    cv.text(&progress, R::new(progress_x, area.y - 2.0, 150.0, 20.0), 12.0, 500, DIM, Align::Left);
     let eye = if app.cfg.todo_show_done { "Hide done" } else { "Show done" };
-    pill_button(cv, app, R::new(area.right() - 200.0, area.y - 4.0, 90.0, 24.0), eye, Hit::ShowDone, false);
-    pill_button(cv, app, R::new(area.right() - 102.0, area.y - 4.0, 102.0, 24.0), "+ Add task", Hit::TodoAdd, false);
+    let eye_x = area.right() - if app.notch.task_day.is_some() { 90.0 } else { 200.0 };
+    pill_button(cv, app, R::new(eye_x, area.y - 4.0, 90.0, 24.0), eye, Hit::ShowDone, false);
+    if app.notch.task_day.is_none() {
+        pill_button(cv, app, R::new(area.right() - 102.0, area.y - 4.0, 102.0, 24.0), "+ Add task", Hit::TodoAdd, false);
+    }
 
-    let editing_due = app.notch.due_edit.is_some() || matches!(app.notch.field.as_ref().map(|f| &f.target), Some(EditTarget::NewTask));
-    let bottom_h = if editing_due { 72.0 } else { 36.0 };
+    let editing_due = app.notch.due_edit.is_some() || matches!(app.notch.field.as_ref().map(|f| &f.target), Some(EditTarget::NewTask | EditTarget::ReminderTime));
+    let bottom_h = if app.notch.task_error.is_some() { 96.0 } else if editing_due { 72.0 } else { 36.0 };
     let list = R::new(area.x - 6.0, area.y + 26.0, area.w + 12.0, area.h - 26.0 - bottom_h);
     let todos = visible_todos(app);
     if todos.is_empty() {
-        let msg = if app.todos.items.is_empty() { "Nothing to do yet. Add your first task." } else { "All done. Nice work." };
+        let msg = if let Some(day) = app.notch.task_day {
+            if app.todos.on_day(day).is_empty() { "No tasks for this day." } else { "All tasks for this day are done." }
+        } else if app.todos.items.is_empty() { "Nothing to do yet. Add your first task." } else { "All done. Nice work." };
         cv.text(msg, list, 12.5, 500, DIM, Align::Center);
     }
     let max_scroll = views::todo_overflow(app);
@@ -608,7 +654,13 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
         }
         // Due chip
         let overdue = !t.done && t.due.is_some_and(|d| d <= now);
-        let due_text = t.due.map(|d| due_label(app, d, now)).unwrap_or_else(|| if show_controls { "+ Time".into() } else { String::new() });
+        let due_text = t.due.map(|d| {
+            if app.notch.task_day.is_some() { sys::format_time(&store::local(d), app.cfg.clock_format) } else { due_label(app, d, now) }
+        }).unwrap_or_else(|| {
+            if let Some(day) = t.day() {
+                if app.notch.task_day.is_some() { "No reminder".into() } else { day.format("%a %-d %b").to_string() }
+            } else if show_controls { "+ Time".into() } else { String::new() }
+        });
         let dw = if due_text.is_empty() { 0.0 } else { app.gfx.text_width(&due_text, 11.0, 600) + 18.0 };
         let del_x = row.right() - 16.0;
         let chip = R::new(del_x - 18.0 - dw, row.cy() - 10.0, dw, 20.0);
@@ -644,8 +696,13 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
     if editing_due {
         due_picker(cv, app, R::new(area.x, area.bottom() - 66.0, area.w, 28.0), now);
     }
-    let field = app.notch.field.clone().filter(|f| f.target == EditTarget::NewTask);
-    let fr = R::new(area.x + 30.0, y, area.w - 30.0, 30.0);
+    if let Some(error) = &app.notch.task_error {
+        cv.text(error, R::new(area.x, area.bottom() - 90.0, area.w, 20.0), 11.0, 500, C::hex(0xFFB020), Align::Left);
+    }
+    let field = app.notch.field.clone().filter(|f| f.target == EditTarget::NewTask)
+        .or_else(|| app.notch.time_return.clone().filter(|f| f.target == EditTarget::NewTask));
+    let fr = R::new(area.x + 30.0, y, area.w - 96.0, 30.0);
+    pill_button(cv, app, R::new(area.right() - 58.0, y + 2.0, 58.0, 26.0), "Add", Hit::TodoAdd, false);
     let color = C::hex(TODO_COLORS[app.notch.new_color % TODO_COLORS.len()]);
     icon_button(cv, app, area.x + 11.0, y + 15.0, 7.0, '\u{25CF}', Hit::NewColor, color);
     cv.fill_circle(area.x + 11.0, y + 15.0, 6.0, color);
@@ -655,7 +712,13 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
                 Some(d) => format!("New task  ·  reminder {}", due_label(app, d, now)),
                 None => "New task, press Enter to add".to_string(),
             };
-            views::draw_field(cv, app, fr, &f, &hint);
+            if app.notch.field.as_ref().is_some_and(|field| field.target == EditTarget::ReminderTime) {
+                cv.fill_rrect(fr, 9.0, C::WHITE.a(0.05));
+                cv.text(if f.text.is_empty() { "Task name…" } else { &f.text }, fr.inset(12.0, 0.0), 12.5, 500, DIM, Align::Left);
+                hit(app, fr, Hit::TodoField);
+            } else {
+                views::draw_field(cv, app, fr, &f, &hint);
+            }
         }
         None => {
             hit(app, fr, Hit::TodoField);
@@ -668,6 +731,30 @@ pub fn todo(cv: &mut Canvas, app: &mut App, area: R) {
 }
 
 fn due_picker(cv: &mut Canvas, app: &mut App, r: R, now: i64) {
+    if let Some(day) = views::reminder_day(app) {
+        let current = views::current_due(app);
+        cv.text("Reminder", R::new(r.x, r.y, 66.0, r.h), 11.5, 600, DIM, Align::Left);
+        if current.is_none() {
+            pill_chip(cv, app, R::new(r.x + 72.0, r.y, 112.0, r.h), "Add reminder", Hit::DueEnable);
+            let note = if day < store::day_of(now) { "Off · past day" } else { "Off · no notification" };
+            cv.text(note, R::new(r.x + 196.0, r.y, r.w - 196.0, r.h), 11.5, 500, DIM, Align::Left);
+        } else {
+            cv.text("On", R::new(r.x + 72.0, r.y, 48.0, r.h), 11.5, 600, accent(app), Align::Left);
+            icon_button(cv, app, r.x + 142.0, r.cy(), 9.0, '\u{E738}', Hit::DueStep(-1), C::WHITE);
+            let time_r = R::new(r.x + 160.0, r.y, 126.0, r.h);
+            if let Some(field) = app.notch.field.clone().filter(|f| f.target == EditTarget::ReminderTime) {
+                views::draw_field(cv, app, time_r, &field, "09:00 or 2:30 pm");
+            } else {
+                let label = sys::format_time(&store::local(current.unwrap()), app.cfg.clock_format);
+                pill_chip(cv, app, time_r, &label, Hit::DueTime);
+            }
+            icon_button(cv, app, r.x + 306.0, r.cy(), 9.0, icon::ADD, Hit::DueStep(1), C::WHITE);
+            let editing = app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime);
+            let (label, action) = if editing { ("Set time", Hit::DueTime) } else { ("Turn off", Hit::DueClear) };
+            pill_chip(cv, app, R::new(r.right() - 76.0, r.y, 76.0, r.h), label, action);
+        }
+        return;
+    }
     let mut x = r.x;
     for (k, label) in views::DUE_CHIPS.iter().enumerate() {
         let w = app.gfx.text_width(label, 11.5, 600) + 22.0;
@@ -780,8 +867,8 @@ pub fn calendar(cv: &mut Canvas, app: &mut App, area: R) {
         let r = R::new(panel.x + 10.0, y, panel.w - 20.0, 26.0);
         cv.fill_rrect(R::new(r.x + 10.0, r.y + 6.0, 4.0, r.h - 12.0), 2.0, EVENT_COLOR);
         let time = if e.all_day || e.start < day_start { "All day".to_string() } else { sys::format_time(&store::local(e.start), app.cfg.clock_format) };
-        cv.text(&time, R::new(r.x + 26.0, r.y, 64.0, r.h), 11.5, 600, DIM, Align::Left);
-        cv.text(&e.title, R::new(r.x + 90.0, r.y, r.w - 90.0, r.h), 12.5, 550, C::WHITE, Align::Left);
+        cv.text(&time, R::new(r.x + 26.0, r.y, 82.0, r.h), 11.5, 600, DIM, Align::Left);
+        cv.text(&e.title, R::new(r.x + 112.0, r.y, r.w - 112.0, r.h), 12.5, 550, C::WHITE, Align::Left);
         y += 27.0;
     }
     for t in tasks.iter().take(AGENDA_ROWS.saturating_sub(events.len())) {
@@ -794,9 +881,9 @@ pub fn calendar(cv: &mut Canvas, app: &mut App, area: R) {
         } else {
             cv.stroke_circle(r.x + 12.0, r.cy(), 6.0, color, 1.5);
         }
-        let time = t.due.map(|d| sys::format_time(&store::local(d), app.cfg.clock_format)).unwrap_or_default();
-        cv.text(&time, R::new(r.x + 26.0, r.y, 64.0, r.h), 11.5, 600, DIM, Align::Left);
-        cv.text(&t.title, R::new(r.x + 90.0, r.y, r.w - 90.0, r.h), 12.5, 550, if t.done { C::WHITE.a(0.4) } else { C::WHITE }, Align::Left);
+        let time = t.due.map(|d| sys::format_time(&store::local(d), app.cfg.clock_format)).unwrap_or_else(|| "No reminder".into());
+        cv.text(&time, R::new(r.x + 26.0, r.y, 82.0, r.h), 11.5, 600, DIM, Align::Left);
+        cv.text(&t.title, R::new(r.x + 112.0, r.y, r.w - 112.0, r.h), 12.5, 550, if t.done { C::WHITE.a(0.4) } else { C::WHITE }, Align::Left);
         y += 27.0;
     }
 }

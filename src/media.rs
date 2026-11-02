@@ -54,6 +54,11 @@ pub enum Command {
     NextSource,
 }
 
+/// Forgets the remembered player, so the next one Windows considers current is followed.
+pub fn forget_preferred() {
+    PREFERRED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 pub fn start(preferred: String) {
     *PREFERRED.lock().unwrap_or_else(|e| e.into_inner()) = preferred;
     std::thread::spawn(|| {

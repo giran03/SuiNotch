@@ -14,6 +14,7 @@ use windows::Web::Http::HttpClient;
 
 use crate::events::{post, Event, MediaInfo};
 use crate::lrc::{self, Line};
+use crate::words::{self, Word};
 use crate::{localized, lyrics_cache, netease};
 
 const API: &str = "https://lrclib.net/api";
@@ -46,13 +47,38 @@ pub struct Found {
     pub translation: Vec<Line>,
     /// The lines in Latin letters, for songs in other scripts; empty when there are none.
     pub romaji: Vec<Line>,
+    /// The timing of each word of each line, one list per line; a line without any has an empty list,
+    /// and a song without any has none at all.
+    pub words: Vec<Vec<Word>>,
 }
 
 impl Found {
-    fn from_netease(n: netease::Lyrics) -> Found {
-        Found { lines: n.lines, source: Source::Netease, synced: true, translation: n.translation, romaji: n.romaji }
+    fn from_netease(n: netease::Lyrics, duration_ms: u64) -> Found {
+        let words = kept(&n.lines, words::attach(&n.lines, &n.timed), duration_ms);
+        Found { lines: n.lines, source: Source::Netease, synced: true, translation: n.translation, romaji: n.romaji, words }
+    }
+
+    fn from_lrclib(lines: Vec<Line>, synced: bool) -> Found {
+        Found { lines, source: Source::Lrclib, synced, translation: Vec::new(), romaji: Vec::new(), words: Vec::new() }
+    }
+
+    pub fn has_words(&self) -> bool {
+        self.words.iter().any(|w| !w.is_empty())
     }
 }
+
+/// Word lists as they are kept: vetted (see `words::vet`), and none at all when no line has any left.
+fn kept(lines: &[Line], words: Vec<Vec<Word>>, duration_ms: u64) -> Vec<Vec<Word>> {
+    match words::vet(lines, words, duration_ms) {
+        Ok(words) if words.iter().any(|w| !w.is_empty()) => words,
+        Ok(_) => Vec::new(),
+        Err(why) => {
+            crate::log(&format!("word timing thrown away: {why:?}"));
+            Vec::new()
+        }
+    }
+}
+
 
 /// One name a song goes by: its title and main artist.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,16 +121,25 @@ pub struct Options {
     pub retries: u32,
     /// Romaji or a translation is wanted, so LRCLIB lyrics (which have none) get them from NetEase.
     pub extras: bool,
+    /// The highlight follows words, so lyrics from LRCLIB (which has no word timing) look for it on NetEase.
+    pub words: bool,
 }
 
 impl Options {
     pub fn from_config(cfg: &crate::config::Config) -> Options {
-        Options { fallback: cfg.lyrics_fallback, cache: cfg.lyrics_cache, retries: cfg.lyrics_retries, extras: cfg.wants_lyric_extras() }
+        Options {
+            fallback: cfg.lyrics_fallback,
+            cache: cfg.lyrics_cache,
+            retries: cfg.lyrics_retries,
+            extras: cfg.wants_lyric_extras(),
+            words: cfg.wants_word_timing(),
+        }
     }
 }
 
-/// Songs already asked NetEase for romaji and a translation this run, so one without any is not asked again.
-static EXTRAS_ASKED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// Songs already asked NetEase for romaji, translations and word timing this run, and whether word
+/// timing was asked for, so a song that has none is not asked again.
+static EXTRAS_ASKED: Mutex<Vec<(u64, bool)>> = Mutex::new(Vec::new());
 
 /// Pause between one search round and the next.
 const RETRY_PAUSE: Duration = Duration::from_secs(1);
@@ -138,36 +173,46 @@ pub fn fetch(info: MediaInfo, attempt: usize, opts: Options) {
     });
 }
 
-/// Whether synced lyrics lack the romaji and translation that are wanted, and NetEase has not been asked yet.
+/// Whether synced lyrics lack the romaji and translation, or the word timing, that are wanted.
 fn needs_extras(f: &Found, opts: Options) -> bool {
-    opts.extras && opts.fallback && f.synced && f.translation.is_empty() && f.romaji.is_empty()
+    let lacks_extras = opts.extras && f.translation.is_empty() && f.romaji.is_empty();
+    let lacks_words = opts.words && !f.has_words();
+    opts.fallback && f.synced && (lacks_extras || lacks_words)
 }
 
-/// LRCLIB has no romaji or translations, so for lyrics from there they are taken from the same song
-/// on NetEase. Only those lines are used: they are matched to the LRCLIB ones by time.
+/// LRCLIB has no romaji, translations or word timing, so for lyrics from there they are taken from the
+/// same song on NetEase. Only those are used: the lines stay as they are, and the extras and words are
+/// matched to them by time (and, for words, by text).
 fn with_extras(key: u64, info: &MediaInfo, mut found: Found, opts: Options, generation: u64) -> Found {
     if !needs_extras(&found, opts) {
         return found;
     }
     {
         let mut asked = EXTRAS_ASKED.lock().unwrap_or_else(|e| e.into_inner());
-        if asked.contains(&key) {
+        if asked.contains(&(key, opts.words)) {
             return found;
         }
-        asked.push(key);
+        asked.push((key, opts.words));
     }
     let Ok(client) = client() else { return found };
     let names = names_for(&client, info, true);
-    let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1).into_iter().next() else { return found };
-    if n.translation.is_empty() && n.romaji.is_empty() {
-        return found;
-    }
-    found.translation = n.translation;
-    found.romaji = n.romaji;
+    let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1, opts.words && !found.has_words()).into_iter().next() else { return found };
+    merge_extras(&mut found, n, opts, info.duration_ms);
     if opts.cache && GENERATION.load(Ordering::SeqCst) == generation {
         lyrics_cache::store(key, info.duration_ms, &found);
     }
     found
+}
+
+/// Takes what `found` lacks and `n` has: romaji and a translation when they are wanted, and word timing.
+fn merge_extras(found: &mut Found, n: netease::Lyrics, opts: Options, duration_ms: u64) {
+    if opts.extras && found.translation.is_empty() && found.romaji.is_empty() {
+        found.translation = n.translation;
+        found.romaji = n.romaji;
+    }
+    if opts.words && !found.has_words() {
+        found.words = kept(&found.lines, words::attach(&found.lines, &n.timed), duration_ms);
+    }
 }
 
 fn search_until(info: &MediaInfo, attempt: usize, opts: Options, generation: u64) -> Option<Found> {
@@ -180,7 +225,7 @@ fn search_until(info: &MediaInfo, attempt: usize, opts: Options, generation: u64
         if GENERATION.load(Ordering::SeqCst) != generation {
             return None;
         }
-        let looked_up = if attempt == 0 { lookup(info, opts.fallback) } else { lookup_other(info, attempt, opts.fallback) };
+        let looked_up = if attempt == 0 { lookup(info, opts.fallback, opts.words) } else { lookup_other(info, attempt, opts.fallback, opts.words) };
         let found = looked_up.unwrap_or_else(|e| {
             crate::log(&format!("lyrics lookup failed: {e}"));
             None
@@ -240,7 +285,8 @@ fn lrclib_best(client: &HttpClient, info: &MediaInfo, names: &[Names]) -> Option
             crate::log(&format!("lrclib search failed: {e}"));
             String::new()
         });
-        let results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
+        let mut results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
+        results.retain(|v| same_version(&n.title, v));
         if let Some(f) = pick_best(&results, duration_s).and_then(|v| found_from(v, info.duration_ms)) {
             if f.synced {
                 return Some(f);
@@ -253,7 +299,7 @@ fn lrclib_best(client: &HttpClient, info: &MediaInfo, names: &[Names]) -> Option
 
 /// Best lyrics for the song. Synced ones win: plain LRCLIB lyrics are kept only when
 /// nothing synced turns up, from LRCLIB or the fallback.
-fn lookup(info: &MediaInfo, fallback: bool) -> Result<Option<Found>> {
+fn lookup(info: &MediaInfo, fallback: bool, words: bool) -> Result<Option<Found>> {
     let client = client()?;
     let names = names_for(&client, info, fallback);
     let lrclib = lrclib_best(&client, info, &names);
@@ -261,8 +307,8 @@ fn lookup(info: &MediaInfo, fallback: bool) -> Result<Option<Found>> {
         return Ok(lrclib);
     }
     if fallback {
-        if let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1).into_iter().next() {
-            return Ok(Some(Found::from_netease(n)));
+        if let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1, words).into_iter().next() {
+            return Ok(Some(Found::from_netease(n, info.duration_ms)));
         }
     }
     Ok(lrclib)
@@ -270,7 +316,7 @@ fn lookup(info: &MediaInfo, fallback: bool) -> Result<Option<Found>> {
 
 /// Another candidate for "Search again": the search results in order of fit, then a broader
 /// search by title alone, then the fallback's songs.
-fn lookup_other(info: &MediaInfo, attempt: usize, fallback: bool) -> Result<Option<Found>> {
+fn lookup_other(info: &MediaInfo, attempt: usize, fallback: bool, words: bool) -> Result<Option<Found>> {
     let client = client()?;
     let names = names_for(&client, info, fallback);
     let duration_s = info.duration_ms as f64 / 1000.0;
@@ -282,7 +328,7 @@ fn lookup_other(info: &MediaInfo, attempt: usize, fallback: bool) -> Result<Opti
         ] {
             let body = get(&client, &url).unwrap_or_default();
             let results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
-            for v in ranked(&results, duration_s) {
+            for v in ranked(&results, duration_s).into_iter().filter(|v| same_version(&n.title, v)) {
                 if !candidates.iter().any(|c| c.get("id") == v.get("id")) {
                     candidates.push(v.clone());
                 }
@@ -291,9 +337,15 @@ fn lookup_other(info: &MediaInfo, attempt: usize, fallback: bool) -> Result<Opti
     }
     let mut usable: Vec<Found> = candidates.iter().filter_map(|v| found_from(v, info.duration_ms)).collect();
     if fallback {
-        usable.extend(netease::lookup(&client, &names, info.duration_ms, 3).into_iter().map(Found::from_netease));
+        usable.extend(netease::lookup(&client, &names, info.duration_ms, 3, words).into_iter().map(|n| Found::from_netease(n, info.duration_ms)));
     }
     Ok(if usable.is_empty() { None } else { Some(usable[attempt % usable.len()].clone()) })
+}
+
+/// Whether an LRCLIB record is the same version of the song as `title` (not its live, remix or cover).
+/// A record with no name says nothing, so it passes.
+fn same_version(title: &str, record: &Value) -> bool {
+    record.get("trackName").and_then(Value::as_str).is_none_or(|name| crate::versions::mismatch(title, name).is_none())
 }
 
 /// Results ordered: synced and the right length, synced, the right length, then the rest.
@@ -315,12 +367,12 @@ fn found_from(v: &Value, duration_ms: u64) -> Option<Found> {
     if let Some(synced) = v.get("syncedLyrics").and_then(Value::as_str) {
         let lines = lrc::parse(synced);
         if !lines.is_empty() {
-            return Some(Found { lines, source: Source::Lrclib, synced: true, translation: Vec::new(), romaji: Vec::new() });
+            return Some(Found::from_lrclib(lines, true));
         }
     }
     let plain = v.get("plainLyrics").and_then(Value::as_str)?;
     let lines = lrc::from_plain(plain, duration_ms);
-    (!lines.is_empty()).then_some(Found { lines, source: Source::Lrclib, synced: false, translation: Vec::new(), romaji: Vec::new() })
+    (!lines.is_empty()).then(|| Found::from_lrclib(lines, false))
 }
 
 /// Prefers synced lyrics whose length matches the playing track.
@@ -447,15 +499,39 @@ mod tests {
 
     #[test]
     fn only_synced_lyrics_without_extras_ask_for_them_when_wanted() {
-        let opts = Options { fallback: true, cache: true, retries: 0, extras: true };
+        let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: false };
         let bare = found_from(&json!({"syncedLyrics": "[00:01.00]a"}), 100_000).unwrap();
         assert!(needs_extras(&bare, opts));
         assert!(!needs_extras(&bare, Options { extras: false, ..opts }));
+        // Word timing alone is reason enough, until the song has it.
+        let words_only = Options { extras: false, words: true, ..opts };
+        assert!(needs_extras(&bare, words_only));
+        let timed = Found { words: vec![vec![Word { start_ms: 1000, dur_ms: 100, chars: 1 }]], ..bare.clone() };
+        assert!(!needs_extras(&timed, words_only));
         assert!(!needs_extras(&bare, Options { fallback: false, ..opts }));
         let plain = found_from(&json!({"plainLyrics": "a\nb"}), 100_000).unwrap();
         assert!(!needs_extras(&plain, opts));
         let with = Found { translation: vec![Line { at_ms: 1000, text: "x".into() }], ..bare };
         assert!(!needs_extras(&with, opts));
+    }
+
+    #[test]
+    fn extras_and_words_are_taken_only_where_missing_and_wanted() {
+        let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: true };
+        let lyrics = || netease::Lyrics {
+            lines: Vec::new(),
+            translation: vec![Line { at_ms: 1000, text: "hola".into() }],
+            romaji: Vec::new(),
+            timed: crate::words::parse_yrc("[1000,500](1000,250,0)hel(1250,250,0)lo"),
+        };
+        let mut f = found_from(&json!({"syncedLyrics": "[00:01.00]hello"}), 100_000).unwrap();
+        merge_extras(&mut f, lyrics(), opts, 100_000);
+        assert_eq!(f.translation.len(), 1);
+        assert!(f.has_words());
+        // What the song already has is left alone.
+        let mut g = found_from(&json!({"syncedLyrics": "[00:01.00]hello"}), 100_000).unwrap();
+        merge_extras(&mut g, lyrics(), Options { extras: false, words: false, ..opts }, 100_000);
+        assert!(g.translation.is_empty() && !g.has_words());
     }
 
     #[test]

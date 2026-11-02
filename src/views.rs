@@ -214,10 +214,7 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
     if let Some(m) = app.media.as_ref() {
         let playing = m.info.playing;
         let art = R::new(body.x + 12.0, cy - 10.0, 20.0, 20.0);
-        if !pages::draw_artwork(cv, app, art, 5.0) {
-            cv.fill_rrect(art, 5.0, C::WHITE.a(0.12));
-            cv.glyph(icon::MUSIC, art.cx(), art.cy(), 10.0, DIM);
-        }
+        pages::draw_art(cv, app, art, 5.0);
         let color = app.art_color.unwrap_or(accent);
         let ex = body.right() - 30.0;
         if playing && app.cfg.equalizer {
@@ -302,7 +299,11 @@ fn lyric_frame<'a>(app: &App, look: crate::lyric_style::Look, text: &'a str, sec
         second,
         look,
         fade: app.notch.line_fade.value,
-        sung: crate::lyric_style::progress(&app.lyrics, i, app.lyric_pos().unwrap_or(0)),
+        fill: if look.words {
+            crate::lyric_draw::Fill::Chars(app.sung_chars(i))
+        } else {
+            crate::lyric_draw::Fill::Even(crate::lyric_style::progress(&app.lyrics, i, app.lyric_pos().unwrap_or(0)))
+        },
         secs: app.notch.line_since.elapsed().as_secs_f32(),
         art: app.art_color,
         accent: accent(app),
@@ -533,6 +534,10 @@ pub fn draw_field(cv: &Canvas, app: &App, r: R, field: &TextField, placeholder: 
     let before: String = field.text.chars().take(field.caret).collect();
     let caret_x = app.gfx.text_width(&before, 12.5, 500);
     let shift = (caret_x - inner.w + 6.0).max(0.0);
+    if field.target == EditTarget::ReminderTime && app.notch.time_select_all {
+        let width = app.gfx.text_width(&field.text, 12.5, 500).min(inner.w);
+        cv.fill_rrect(R::new(inner.x, r.cy() - 9.0, width, 18.0), 2.0, accent(app).a(0.35));
+    }
     cv.text(&field.text, R::new(inner.x - shift, inner.y, inner.w + shift, inner.h), 12.5, 500, C::WHITE, Align::Left);
     let blink = (app.started.elapsed().as_millis() / 530) % 2 == 0;
     if blink {
@@ -555,7 +560,11 @@ pub fn volume_bar_rect(app: &App) -> Option<R> {
 pub fn todo_overflow(app: &App) -> f32 {
     let rows = pages::visible_todos(app).len() as f32;
     let (_, h) = Page::Todo.size(false);
-    let list_h = h - 40.0 - 18.0 - 30.0 - 40.0;
+    let header = if app.notch.task_day.is_some() { 28.0 } else { 0.0 };
+    let editing = app.notch.due_edit.is_some() || app.notch.field.as_ref()
+        .is_some_and(|f| matches!(f.target, EditTarget::NewTask | EditTarget::ReminderTime));
+    let bottom = if app.notch.task_error.is_some() { 96.0 } else if editing { 72.0 } else { 36.0 };
+    let list_h = (h - 40.0 - 18.0 - header - 26.0 - bottom).max(0.0);
     (rows * pages::TODO_ROW - list_h).max(0.0)
 }
 
@@ -733,7 +742,10 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             if let Some(t) = app.todos.get(id) {
                 let text = t.title.clone();
                 let caret = text.chars().count();
-                if app.notch.field.is_some() {
+                notch::cancel_time_edit(app);
+                if app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::NewTask) {
+                    notch::stash_task_draft(app);
+                } else if app.notch.field.is_some() {
                     notch::commit_field(app);
                 }
                 app.notch.field = Some(TextField { target: EditTarget::Rename(id), text, caret });
@@ -743,30 +755,97 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             app.todos.cycle_color(id);
             app.save_todos();
         }
-        Hit::TodoDue(id) => app.notch.due_edit = if app.notch.due_edit == Some(id) { None } else { Some(id) },
+        Hit::TodoDue(id) => {
+            notch::cancel_time_edit(app);
+            app.notch.due_edit = if app.notch.due_edit == Some(id) { None } else { Some(id) };
+        }
         Hit::TodoDelete(id) => {
             app.todos.remove(id);
             if app.notch.due_edit == Some(id) {
+                notch::cancel_time_edit(app);
                 app.notch.due_edit = None;
             }
             app.save_todos();
             notch::schedule(app);
         }
         Hit::TodoAdd | Hit::TodoField => {
+            if app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime) {
+                notch::commit_field(app);
+                if app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime) {
+                    return;
+                }
+            }
             if !matches!(app.notch.field.as_ref().map(|f| &f.target), Some(EditTarget::NewTask)) {
-                app.notch.field = Some(TextField { target: EditTarget::NewTask, text: String::new(), caret: 0 });
-                app.notch.due_edit = None;
+                if app.notch.field.is_some() {
+                    notch::commit_field(app);
+                }
+                notch::begin_task_day(app, app.notch.task_day);
             } else if h == Hit::TodoAdd {
                 notch::commit_field(app);
             }
+            app.notch.due_edit = None;
         }
         Hit::NewColor => app.notch.new_color = (app.notch.new_color + 1) % store::TODO_COLORS.len(),
         Hit::DueChip(k) => apply_due(app, quick_due(k, now)),
         Hit::DueStep(dir) => {
-            let current = current_due(app).unwrap_or_else(|| round_up(now, 15));
-            apply_due(app, Some(current + dir as i64 * 15 * 60));
+            notch::cancel_time_edit(app);
+            if let Some(day) = reminder_day(app) {
+                let candidate = current_due(app).ok_or("Enable a reminder first").and_then(|current| {
+                    use chrono::Timelike;
+                    let time = store::local(current);
+                    let minutes = time.hour() as i32 * 60 + time.minute() as i32 + dir as i32 * 15;
+                    if !(0..1440).contains(&minutes) {
+                        return Err("The reminder must stay on the selected day");
+                    }
+                    notch::reminder_at(day, minutes as u32 / 60, minutes as u32 % 60, now)
+                });
+                match candidate {
+                    Ok(due) => apply_due(app, Some(due)),
+                    Err(error) => app.notch.task_error = Some(error.into()),
+                }
+            } else {
+                let current = current_due(app).unwrap_or_else(|| round_up(now, 15));
+                apply_due(app, Some(current + dir as i64 * 15 * 60));
+            }
         }
-        Hit::DueClear => apply_due(app, None),
+        Hit::DueClear => {
+            notch::cancel_time_edit(app);
+            apply_due(app, None);
+        }
+        Hit::DueEnable => {
+            let day = reminder_day(app).unwrap_or_else(|| store::day_of(now));
+            match notch::default_reminder(day, now) {
+                Ok(due) => apply_due(app, Some(due)),
+                Err(error) => app.notch.task_error = Some(error.into()),
+            }
+        }
+        Hit::DueTime => {
+            if app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime) {
+                notch::commit_field(app);
+            } else {
+                let time = current_due(app).map(store::local);
+                let text = time.map(|time| crate::sys::format_time(&time, app.cfg.clock_format)).unwrap_or_default();
+                let caret = text.chars().count();
+                app.notch.time_return = app.notch.field.take();
+                app.notch.field = Some(TextField { target: EditTarget::ReminderTime, text, caret });
+                app.notch.time_select_all = true;
+                app.notch.task_error = None;
+            }
+        }
+        Hit::TodoCalendar => {
+            if let Some(day) = app.notch.task_day {
+                use chrono::Datelike;
+                app.notch.cal_sel = day;
+                app.notch.cal_month = (day.year(), day.month());
+            }
+            notch::set_page(app, Page::Calendar);
+        }
+        Hit::TodoAll => notch::begin_task_day(app, None),
+        Hit::TodoDayStep(dir) => {
+            if let Some(day) = app.notch.task_day.and_then(|day| day.checked_add_signed(chrono::Duration::days(dir as i64))) {
+                notch::begin_task_day(app, Some(day));
+            }
+        }
         Hit::ShowDone => {
             let mut c = app.cfg.clone();
             c.todo_show_done = !c.todo_show_done;
@@ -791,14 +870,12 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::CalDay(d) => app.notch.cal_sel = d,
         Hit::CalAdd => {
             let day = app.notch.cal_sel;
-            let due = if day == notch::today() { round_up(now + 3600, 15) } else { store::at_local(day, 9, 0) };
-            app.notch.new_due = Some(due);
-            app.notch.field = Some(TextField { target: EditTarget::NewTask, text: String::new(), caret: 0 });
             notch::set_page(app, Page::Todo);
+            notch::begin_task_day(app, Some(day));
         }
         Hit::AlertPrimary => crate::alerts::action(app, true),
         Hit::AlertSecondary => crate::alerts::action(app, false),
-        Hit::AlertClose => app.notch.alert = None,
+        Hit::AlertClose => { app.notch.alert = None; crate::sound::stop(); },
     }
     notch::request_frame(app);
 }
@@ -842,14 +919,22 @@ fn shelf_click(app: &mut App, i: usize, ctrl: bool, shift: bool) {
     }
 }
 
-fn current_due(app: &App) -> Option<i64> {
+pub fn current_due(app: &App) -> Option<i64> {
     match app.notch.due_edit {
         Some(id) => app.todos.get(id).and_then(|t| t.due),
         None => app.notch.new_due,
     }
 }
 
-fn apply_due(app: &mut App, due: Option<i64>) {
+pub fn reminder_day(app: &App) -> Option<chrono::NaiveDate> {
+    match app.notch.due_edit {
+        Some(id) => app.todos.get(id).and_then(|t| t.day()),
+        None => app.notch.task_day,
+    }
+}
+
+pub fn apply_due(app: &mut App, due: Option<i64>) {
+    app.notch.task_error = None;
     match app.notch.due_edit {
         Some(id) => {
             app.todos.set_due(id, due);

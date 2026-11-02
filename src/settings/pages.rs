@@ -28,6 +28,7 @@ impl Ui<'_, '_> {
             8 => self.shelf(&cfg, app.shelf.items.len()),
             9 => self.clipboard(&cfg, app.clips.items.len()),
             10 => self.hud(&cfg),
+            SOUNDS_PAGE => self.sounds(&cfg),
             CHANGELOG_PAGE => self.changelog(),
             DIAG_PAGE => self.diagnostics(),
             _ => self.about(&cfg, &app.update),
@@ -68,9 +69,10 @@ impl Ui<'_, '_> {
         self.toggle(c, r[3], "Sui mascot", Some("A little droplet that lives in the notch"), |c| &mut c.mascot);
         self.toggle(c, r[4], "Sui reactions", Some("Sui cheers for finished focus sessions, goals and tasks, and naps on long breaks"), |c| &mut c.sui_reactions);
         self.section("Sounds and quiet");
-        let r = self.card(&[ROW_SUB, ROW_SUB]);
-        self.toggle(c, r[0], "Reminder sounds", Some("Chimes for Pomodoro, To-do and Water"), |c| &mut c.sounds);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        self.toggle(c, r[0], "Reminder sounds", Some("Chimes for timers, tasks, calendar and water"), |c| &mut c.sounds);
         self.toggle(c, r[1], "Respect Do Not Disturb", Some("Hold reminders while Windows is in Do Not Disturb, presenting or gaming"), |c| &mut c.respect_quiet);
+        self.button(r[2], "Sound library", Some("Presets, custom imports and reminder choices"), "Open", Act::Link(SOUNDS_PAGE), false);
         self.section("Full screen");
         let r = self.card(&[ROW_SUB]);
         self.toggle(c, r[0], "Hide in full screen", Some("Games, videos and slides that fill the screen"), |c| &mut c.hide_fullscreen);
@@ -175,7 +177,7 @@ impl Ui<'_, '_> {
             n => format!("{n} retries"),
         };
         self.stepper(c, r[2], "Keep searching for", Some("When no lyrics are found, search again this many times. Each retry tries the English and native titles"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
-        self.lyric_look_settings(c, extras);
+        let preview = self.lyric_look_settings(c, extras);
         self.section("Now playing");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Equalizer animation", Some("Moving bars in the closed notch while music plays"), |c| &mut c.equalizer);
@@ -184,32 +186,36 @@ impl Ui<'_, '_> {
         self.section("Privacy");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Lyrics come from LRCLIB", Some("Only the song title, artist, album and length are sent"), "lrclib.net", Act::Website, false);
-        self.toggle(c, r[1], "Fall back to NetEase", Some("Asks NetEase when LRCLIB has none or for romaji and translations, and Apple's store for native titles. Sends the title and artist"), |c| &mut c.lyrics_fallback);
+        self.toggle(c, r[1], "Fall back to other services", Some("Backup lyrics and extras. Sends title and artist to NetEase and Apple"), |c| &mut c.lyrics_fallback);
         self.toggle(c, r[2], "Keep lyrics on this PC", Some("A song already looked up shows at once, even offline"), |c| &mut c.lyrics_cache);
         self.button(r[3], "Clear saved lyrics", Some("Removes the lyrics kept on this PC; they are fetched again when needed"), "Clear", Act::ClearLyricsCache, true);
         let sub = format!("{recent} song{} in the Recently played list", if recent == 1 { "" } else { "s" });
         self.button(r[4], "Clear recently played", Some(&sub), "Clear", Act::ClearRecent, true);
+        // Draw last so the pinned preview covers the scrolling controls.
+        self.lyric_preview_section(c, preview);
     }
 
-    /// The lyric look: a live preview, then each choice. Rows the other choices make pointless are dimmed.
-    fn lyric_look_settings(&mut self, c: &Config, extras: Option<(bool, bool)>) {
+    /// Reserve the preview in normal flow and return its bounded sticky rectangle.
+    fn lyric_look_settings(&mut self, c: &Config, extras: Option<(bool, bool)>) -> R {
         use crate::lyric_style as ls;
         let off = !c.lyrics_pill;
         let in_notch = !c.lyric_look().below_notch();
+        let preview_y = self.y;
+        let preview_h = 22.0 + ROW_PREVIEW + 18.0;
+        self.y += preview_h;
         self.section("Lyrics look");
-        let r = self.card(&[ROW_PREVIEW, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
-        self.lyric_preview(c, r[0]);
+        let r = self.card(&[ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
         self.dimmed(off, |ui| {
-            ui.seg_row(c, r[1], "Lyric preset", Some("Start from a look, then change any choice below; it reads Custom once they match no preset"), &ls::PRESET_LABELS, |c| &mut c.lyrics_preset);
-            ui.seg_row(c, r[2], "Placement", Some("Under the notch, or in it in place of the song title"), &ls::PLACE_LABELS, |c| &mut c.lyrics_place);
+            ui.seg_row(c, r[0], "Lyric preset", Some("Start from a look, then change any choice below; it reads Custom once they match no preset"), &ls::PRESET_LABELS, |c| &mut c.lyrics_preset);
+            ui.seg_row(c, r[1], "Placement", Some("Under the notch, or in it in place of the song title"), &ls::PLACE_LABELS, |c| &mut c.lyrics_place);
         });
         self.dimmed(off || in_notch, |ui| {
             let sub = if in_notch { "Not used in the notch: the notch itself is the backdrop" } else { "What sits behind the line. Album tint follows the cover" };
-            ui.seg_row(c, r[3], "Backdrop", Some(sub), &ls::BACKDROP_LABELS, |c| &mut c.lyrics_backdrop);
+            ui.seg_row(c, r[2], "Backdrop", Some(sub), &ls::BACKDROP_LABELS, |c| &mut c.lyrics_backdrop);
         });
         self.dimmed(off, |ui| {
-            ui.seg_row(c, r[4], "Highlight", Some("Karaoke fill colours the line as it is sung, wherever it is placed"), &ls::HIGHLIGHT_LABELS, |c| &mut c.lyrics_highlight);
-            ui.seg_row(c, r[5], "Text colour", Some("Album tint follows the cover; Accent follows your accent colour"), &ls::COLOR_LABELS, |c| &mut c.lyrics_color);
+            ui.seg_row(c, r[3], "Highlight", Some("Fills the line as it is sung. Words follows each word, but can be off on some songs"), &ls::HIGHLIGHT_LABELS, |c| &mut c.lyrics_highlight);
+            ui.seg_row(c, r[4], "Text colour", Some("Album tint follows the cover; Accent follows your accent colour"), &ls::COLOR_LABELS, |c| &mut c.lyrics_color);
         });
         self.section("Lyrics text");
         let r = self.card(&[ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
@@ -229,6 +235,8 @@ impl Ui<'_, '_> {
         };
         self.dimmed(off, |ui| ui.seg_row(c, r[0], "Second line", Some(&note), &ls::SECOND_LABELS, |c| &mut c.lyrics_second));
         self.seg_row(c, r[1], "Under each line in the panel", Some("Romaji or a translation in the open lyrics panel; its Aあ button switches it too"), &ls::PANEL_ALT_LABELS, |c| &mut c.lyrics_panel_alt);
+        let y = preview::section_y(preview_y, self.y, preview_h);
+        R::new(self.x, y, self.w, preview_h)
     }
 
     fn todo(&mut self, c: &Config) {
@@ -456,9 +464,15 @@ impl Ui<'_, '_> {
         }
         self.seg_row(cfg, r[2], "Automatic updates", Some("Automatic installs only while you're away from the PC"), &update::MODE_LABELS, |c| &mut c.update_mode);
         self.section("Your data");
-        let r = self.card(&[ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Stored only on this PC", Some("Tasks, water log, shelf and settings. No accounts, no tracking"), "Open folder", Act::OpenData, false);
         self.button(r[1], "Diagnostics", Some("Monitors, full-screen detection, players and the log"), "Open", Act::Link(DIAG_PAGE), false);
+        let (text, sub) = if self.s.confirm_reset {
+            ("Press again to reset", "This puts every setting back to a fresh install's")
+        } else {
+            ("Reset", "Every setting back to a fresh install's. Tasks, shelf and water log stay")
+        };
+        self.button(r[2], "Reset all settings", Some(sub), text, Act::ResetAll, true);
     }
 
     /// Results for what is typed in the sidebar search; each opens the page its setting lives on.

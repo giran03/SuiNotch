@@ -126,12 +126,13 @@ fn due_events(app: &App, now: i64) -> Vec<u64> {
 // ------------------------------------------------------------------ events from background threads
 
 pub fn drain_events(app: &mut App) {
+    crate::settings::refresh(app);
     let mut redraw = false;
     while let Ok(ev) = app.events.try_recv() {
         crate::profile::count("event");
         redraw |= on_event(app, ev);
     }
-    if redraw {
+    if redraw || app.notch.alert.is_some() {
         request_frame(app);
     }
 }
@@ -139,6 +140,8 @@ pub fn drain_events(app: &mut App) {
 /// Applies one background event; returns true when the notch looks different afterwards.
 pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
     match ev {
+        Event::SoundImported { result, replacement } => { crate::settings::sounds::import_finished(app, result, replacement); false },
+        Event::SoundMessage(message) => { crate::settings::sounds::message(app, &message); false },
         Event::Media(info) => {
             let Some(info) = info else {
                 app.media = None;
@@ -152,6 +155,7 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
                 app.lyrics.clear();
                 app.lyrics_translation.clear();
                 app.lyrics_romaji.clear();
+                app.lyrics_words.clear();
                 app.lyrics_key = 0;
                 app.lyrics_source = None;
                 crate::lyrics::fetch(info.clone(), 0, crate::lyrics::Options::from_config(&app.cfg));
@@ -171,16 +175,18 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
         Event::Lyrics { key, found } => {
             if app.media.as_ref().is_some_and(|m| m.info.track_key() == key) {
                 app.lyrics_source = found.as_ref().map(|f| (f.source, f.synced));
-                let found = found.unwrap_or(crate::lyrics::Found {
+                let found = found.unwrap_or_else(|| crate::lyrics::Found {
                     lines: Vec::new(),
                     source: crate::lyrics::Source::Lrclib,
                     synced: false,
                     translation: Vec::new(),
                     romaji: Vec::new(),
+                    words: Vec::new(),
                 });
                 app.lyrics = found.lines;
                 app.lyrics_translation = found.translation;
                 app.lyrics_romaji = found.romaji;
+                app.lyrics_words = found.words;
                 app.lyrics_key = key;
             }
             true

@@ -35,10 +35,19 @@ pub struct Todo {
     pub color: usize,
     #[serde(default)]
     pub due: Option<i64>,
+    /// Calendar placement is independent of an optional notification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_day: Option<NaiveDate>,
     #[serde(default)]
     pub alerted: bool,
     #[serde(default)]
     pub done_at: Option<i64>,
+}
+
+impl Todo {
+    pub fn day(&self) -> Option<NaiveDate> {
+        self.scheduled_day.or_else(|| self.due.map(day_of))
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -62,6 +71,7 @@ impl Todos {
             done: false,
             color: color % TODO_COLORS.len(),
             due,
+            scheduled_day: due.map(day_of),
             alerted: false,
             done_at: None,
         });
@@ -95,6 +105,8 @@ impl Todos {
 
     pub fn set_due(&mut self, id: u64, due: Option<i64>) {
         if let Some(t) = self.get_mut(id) {
+            // Materialize a legacy task's date before removing its reminder.
+            t.scheduled_day = due.map(day_of).or_else(|| t.day());
             t.due = due;
             t.alerted = false;
         }
@@ -128,13 +140,13 @@ impl Todos {
     }
 
     pub fn on_day(&self, date: NaiveDate) -> Vec<&Todo> {
-        let mut v: Vec<&Todo> = self.items.iter().filter(|t| t.due.is_some_and(|d| day_of(d) == date)).collect();
-        v.sort_by_key(|t| t.due);
+        let mut v: Vec<&Todo> = self.items.iter().filter(|t| t.day() == Some(date)).collect();
+        v.sort_by_key(|t| (t.due.is_some(), t.due, t.id));
         v
     }
 
     pub fn has_tasks_on(&self, date: NaiveDate) -> bool {
-        self.items.iter().any(|t| !t.done && t.due.is_some_and(|d| day_of(d) == date))
+        self.items.iter().any(|t| !t.done && t.day() == Some(date))
     }
 
     /// (done today, total that counts toward today).
@@ -252,14 +264,16 @@ pub const SHELF_LIMIT: usize = 200;
 
 impl Shelf {
     pub fn add_paths(&mut self, paths: &[PathBuf]) -> usize {
-        let mut added = 0;
+        let mut fresh: Vec<ShelfItem> = Vec::new();
         for p in paths {
             let item = ShelfItem::File { path: p.clone() };
-            if !self.items.contains(&item) {
-                self.items.push(item);
-                added += 1;
+            if !self.items.contains(&item) && !fresh.contains(&item) {
+                fresh.push(item);
             }
         }
+        let added = fresh.len();
+        // Newest first, in the order they were dropped.
+        self.items.splice(0..0, fresh);
         self.trim();
         added
     }
@@ -273,15 +287,15 @@ impl Shelf {
         if self.items.contains(&item) {
             return false;
         }
-        self.items.push(item);
+        self.items.insert(0, item);
         self.trim();
         true
     }
 
     fn trim(&mut self) {
         if self.items.len() > SHELF_LIMIT {
-            let extra = self.items.len() - SHELF_LIMIT;
-            self.items.drain(0..extra);
+            // The oldest are at the end.
+            self.items.truncate(SHELF_LIMIT);
         }
     }
 
@@ -344,6 +358,48 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_tasks_survive_reminder_removal_and_json_round_trips() {
+        let mut todos = Todos::default();
+        let id = todos.add("Plan the day", None, 2).unwrap();
+        let day = day_of(ts(9, 0));
+        todos.get_mut(id).unwrap().scheduled_day = Some(day);
+        assert!(todos.has_tasks_on(day));
+        assert_eq!(todos.on_day(day).len(), 1);
+        assert!(todos.due_alerts(ts(23, 0)).is_empty());
+        todos.set_due(id, Some(ts(10, 0)));
+        todos.set_due(id, None);
+        assert_eq!(todos.get(id).unwrap().day(), Some(day));
+        let restored: Todos = serde_json::from_str(&serde_json::to_string(&todos).unwrap()).unwrap();
+        assert_eq!(restored.items, todos.items);
+    }
+
+    #[test]
+    fn legacy_tasks_keep_calendar_placement_when_reminders_are_cleared() {
+        let mut todo: Todo = serde_json::from_value(serde_json::json!({
+            "id": 1, "title": "Legacy", "done": false, "due": ts(9, 0)
+        })).unwrap();
+        assert_eq!(todo.scheduled_day, None);
+        assert_eq!(todo.day(), Some(day_of(ts(9, 0))));
+        let mut todos = Todos { next_id: 1, items: vec![todo.clone()] };
+        todos.set_due(1, None);
+        assert_eq!(todos.on_day(day_of(ts(9, 0))).len(), 1);
+        assert!(todos.due_alerts(ts(23, 0)).is_empty());
+        todo.due = None;
+        assert_eq!(todo.day(), None);
+    }
+
+    #[test]
+    fn agenda_lists_date_only_tasks_before_timed_tasks_and_snoozes_follow_time() {
+        let mut todos = Todos::default();
+        let timed = todos.add("Timed", Some(ts(10, 0)), 0).unwrap();
+        let untimed = todos.add("Untimed", None, 0).unwrap();
+        todos.get_mut(untimed).unwrap().scheduled_day = Some(day_of(ts(9, 0)));
+        assert_eq!(todos.on_day(day_of(ts(9, 0))).iter().map(|t| t.id).collect::<Vec<_>>(), vec![untimed, timed]);
+        todos.snooze(timed, ts(23, 55), 15);
+        assert_eq!(todos.get(timed).unwrap().day(), day_of(ts(9, 0)).succ_opt());
+    }
+
+    #[test]
     fn todo_alerts_fire_once_and_snooze_reschedules() {
         let mut t = Todos::default();
         let a = t.add("Call", Some(ts(9, 0)), 0).unwrap();
@@ -399,8 +455,21 @@ mod tests {
         assert_eq!(s.add_paths(&[a.clone(), b.clone(), a.clone()]), 2);
         assert!(s.add_text("hello"));
         assert!(!s.add_text("hello"));
+        // Newest first: the text, then the files in the order they were dropped.
+        assert_eq!(s.items[0], ShelfItem::Text { text: "hello".into() });
         s.remove_indices(&[0, 2, 0]);
-        assert_eq!(s.items, vec![ShelfItem::File { path: b }]);
+        assert_eq!(s.items, vec![ShelfItem::File { path: a }]);
+    }
+
+    #[test]
+    fn shelf_puts_new_items_first_and_drops_the_oldest() {
+        let mut s = Shelf::default();
+        for i in 0..SHELF_LIMIT + 3 {
+            s.add_paths(&[PathBuf::from(format!("C:/f{i}.txt"))]);
+        }
+        assert_eq!(s.items.len(), SHELF_LIMIT);
+        assert_eq!(s.items[0], ShelfItem::File { path: PathBuf::from(format!("C:/f{}.txt", SHELF_LIMIT + 2)) });
+        assert_eq!(s.items[SHELF_LIMIT - 1], ShelfItem::File { path: PathBuf::from("C:/f3.txt") });
     }
 
     #[test]

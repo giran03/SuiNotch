@@ -15,7 +15,7 @@ The SuiNotch mark is the notch itself: a pill holding **Sui**, a water droplet (
 | `lockup-horizontal-*.svg` | Primary logo: `color` on light backgrounds, `reversed` on dark ones |
 | `lockup-stacked*.svg` | Square spaces (splash screens, social avatars with a name) |
 | `wordmark.svg` | Name only, when the symbol is already nearby |
-| `app-icon.svg`, `app-icon-small.svg` | App and store icons; the small one is for 32 px and below |
+| `app-icon.svg`, `app-icon-small.svg` | Transparent app icons, with no background tile; the small one is for 32 px and below |
 
 Exported one-colour variants (black, white, Sui Blue) and PNGs are in `brand/exports/`. App icon PNGs and the multi-size `suinotch.ico` are in `brand/icons/`. The exe embeds `assets/suinotch.ico`.
 
@@ -24,7 +24,7 @@ Exported one-colour variants (black, white, Sui Blue) and PNGs are in `brand/exp
 | Name | HEX | RGB | Role |
 |---|---|---|---|
 | Sui Blue | `#3BA7FF` | 59 167 255 | The pill; primary accent |
-| Ink | `#0A0B0D` | 10 11 13 | Wordmark, eyes, app-icon tile, the notch itself |
+| Ink | `#0A0B0D` | 10 11 13 | Wordmark, eyes, the notch itself |
 | White | `#FFFFFF` | 255 255 255 | The droplet |
 
 The pill is always Sui Blue, Ink or White. Accent colours that users choose in Settings tint the app's UI, never the logo.

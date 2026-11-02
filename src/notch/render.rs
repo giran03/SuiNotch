@@ -80,6 +80,35 @@ pub fn request_frame(app: &mut App) {
     crate::ticker::animate(true);
 }
 
+/// Exercise the real page renderer without displaying a window or using desktop input.
+#[cfg(test)]
+pub(super) fn task_snapshot(app: &mut App, path: &std::path::Path, scale: f32) -> Result<()> {
+    let (w, h) = app.notch.page.size(false);
+    let (pw, ph) = ((w * scale) as i32, (h * scale) as i32);
+    let mut surface = Surface::empty();
+    surface.ensure(pw, ph);
+    let rt = gfx::dc_render_target(&app.gfx)?;
+    unsafe {
+        rt.BindDC(surface.dc, &RECT { left: 0, top: 0, right: pw, bottom: ph })?;
+        rt.SetDpi(96.0 * scale, 96.0 * scale);
+        rt.BeginDraw();
+    }
+    let gfx = app.gfx.clone();
+    let target: ID2D1RenderTarget = rt.cast()?;
+    let mut cv = Canvas::new(&gfx, target)?;
+    cv.clear(C::BLACK);
+    app.notch.hits.clear();
+    cv.text(app.notch.page.label(), R::new(24.0, 8.0, 200.0, 22.0), 12.0, 600, views::DIM, gfx::Align::Left);
+    let area = R::new(24.0, 40.0, w - 48.0, h - 58.0);
+    if app.notch.page == Page::Calendar {
+        crate::pages::calendar(&mut cv, app, area);
+    } else {
+        crate::pages::todo(&mut cv, app, area);
+    }
+    unsafe { rt.EndDraw(None, None)? };
+    surface.save_png(&gfx, path, pw, ph)
+}
+
 pub(super) fn frame(app: &mut App) {
     crate::profile::count("frame");
     let now = Instant::now();
@@ -187,7 +216,7 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
     if mascot {
         next = next.min(if n.mascot.mood == crate::mascot::Mood::Awake { n.mascot.next_wake_ms() } else { 50 });
     }
-    if n.field.is_some() {
+    if n.expanded && n.page == Page::Todo && n.field.is_some() {
         next = next.min(500);
     }
     if let Some(due) = n.tip_ready_at {
@@ -200,6 +229,10 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
             }
             // The karaoke fill creeps along the line, and a long line scrolls, so they need a steady
             // stream of frames while shown.
+            // The panel's word highlight moves as fast as the words do.
+            if n.expanded && n.lyrics_view && n.page == Page::Music && app.cfg.wants_word_timing() {
+                next = next.min(33);
+            }
             if n.pill_alpha.target > 0.5 {
                 let look = app.cfg.lyric_look();
                 if look.karaoke || (look.fit == crate::lyric_style::Fit::Scroll && n.pill_overflow) {
@@ -238,6 +271,11 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
     if let Some((_, since)) = &n.notice {
         next = next.min((*since + Duration::from_millis(1500)).saturating_duration_since(Instant::now()).as_millis() as u64 + 1);
     }
+    if let Some((_, since)) = &n.alert {
+        if !n.hovering && !crate::sound::ringing() {
+            next = next.min((*since + ALERT_TIMEOUT).saturating_duration_since(Instant::now()).as_millis() as u64 + 1);
+        }
+    }
     let now = Local::now();
     next.min(((60 - now.second()) as u64) * 1000).max(16)
 }
@@ -250,8 +288,9 @@ pub(super) fn expire_transients(app: &mut App) {
         }
     }
     if let Some((_, since)) = &n.alert {
-        if since.elapsed() > ALERT_TIMEOUT && !n.hovering {
+        if since.elapsed() > ALERT_TIMEOUT && !n.hovering && !crate::sound::ringing() {
             n.alert = None;
+            crate::sound::stop();
         }
     }
     if let Some((_, since)) = &n.notice {
@@ -272,7 +311,8 @@ const TIP_GAP: f32 = 8.0;
 /// and slides across, so exploring the row of controls feels continuous.
 pub(super) fn update_tip(app: &mut App) {
     let n = &app.notch;
-    let active = app.cfg.tooltips && n.expanded && n.pressed.is_none() && n.field.is_none() && !n.vol_drag;
+    let editing = n.page == Page::Todo && n.field.is_some();
+    let active = app.cfg.tooltips && n.expanded && n.pressed.is_none() && !editing && !n.vol_drag;
     let hover = if active { n.hover } else { None };
     let text = hover.and_then(|h| crate::tooltips::text(app, h));
     let rect = hover.and_then(|h| app.notch.hits.iter().rev().find(|(_, x)| *x == h).map(|(r, _)| *r));

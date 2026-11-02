@@ -126,9 +126,9 @@ def main(font_path):
     write("symbol-small-color.svg", svg("0 0 256 256", symbol_color(small=True)))
     write("symbol-reversed.svg", svg("0 0 256 256", symbol_color(pill=WHITE, drop=INK, eye=WHITE)))
 
-    icon = f'<rect width="256" height="256" rx="58" fill="{INK}"/>' + symbol_color()
+    icon = symbol_color()
     write("app-icon.svg", svg("0 0 256 256", icon, "SuiNotch app icon"))
-    icon_small = f'<rect width="256" height="256" rx="58" fill="{INK}"/>' + symbol_color(small=True)
+    icon_small = symbol_color(small=True)
     write("app-icon-small.svg", svg("0 0 256 256", icon_small, "SuiNotch app icon"))
 
     # Horizontal lockup: pill height 1.25x cap height, gap 0.32x pill height.

@@ -10,7 +10,7 @@ pub const PRESET_LABELS: [&str; 6] = ["Pill", "In the notch", "Text only", "Kara
 pub const CUSTOM_PRESET: usize = 5;
 pub const PLACE_LABELS: [&str; 2] = ["Under the notch", "In the notch"];
 pub const BACKDROP_LABELS: [&str; 3] = ["Black pill", "Album tint", "None"];
-pub const HIGHLIGHT_LABELS: [&str; 2] = ["None", "Karaoke fill"];
+pub const HIGHLIGHT_LABELS: [&str; 3] = ["None", "Line", "Words"];
 pub const COLOR_LABELS: [&str; 3] = ["Album tint", "White", "Accent"];
 pub const SIZE_LABELS: [&str; 3] = ["Small", "Medium", "Large"];
 pub const ENTER_LABELS: [&str; 4] = ["Slide", "Fade", "Typewriter", "None"];
@@ -81,7 +81,10 @@ pub enum Fit {
 pub struct Look {
     pub place: Place,
     pub backdrop: Backdrop,
+    /// The line fills with colour as it is sung (the Line or Words highlight).
     pub karaoke: bool,
+    /// The fill follows each word, rather than spreading evenly over the line.
+    pub words: bool,
     pub color: TextColor,
     /// Index into `SIZE_LABELS`.
     pub size: usize,
@@ -145,7 +148,8 @@ impl Config {
         Look {
             place: if self.lyrics_place == 1 { Place::InNotch } else { Place::Under },
             backdrop: [Backdrop::Pill, Backdrop::Tint, Backdrop::None][self.lyrics_backdrop.min(2)],
-            karaoke: self.lyrics_highlight == 1,
+            karaoke: self.lyrics_highlight >= 1,
+            words: self.lyrics_highlight == 2,
             color: [TextColor::Album, TextColor::White, TextColor::Accent][self.lyrics_color.min(2)],
             size: self.lyrics_size.min(2),
             enter: [Enter::Slide, Enter::Fade, Enter::Typewriter, Enter::Instant][self.lyrics_enter.min(3)],
@@ -157,6 +161,11 @@ impl Config {
     /// Romaji or a translation is shown somewhere, so lyrics from a service without them should get them.
     pub fn wants_lyric_extras(&self) -> bool {
         (2..=4).contains(&self.lyrics_second) || self.lyrics_panel_alt > 0
+    }
+
+    /// The highlight follows words, so lyrics should come with word timing where it exists.
+    pub fn wants_word_timing(&self) -> bool {
+        self.lyrics_highlight == 2
     }
 }
 
@@ -205,15 +214,30 @@ pub fn sanitize(c: &mut Config) {
 /// suggests, up to the time until the next line, so a break between lines does not stretch the fill.
 pub fn progress(lines: &[Line], i: usize, pos_ms: u64) -> f32 {
     let Some(line) = lines.get(i) else { return 0.0 };
+    let sing = sing_ms(lines, i);
+    if sing == 0 {
+        return 1.0;
+    }
+    (pos_ms.saturating_sub(line.at_ms) as f32 / sing as f32).clamp(0.0, 1.0)
+}
+
+/// How long line `i` takes to sing, judged from its length, and no longer than the time until the next
+/// line; 0 for a line that is gone before it starts.
+pub fn sing_ms(lines: &[Line], i: usize) -> u64 {
+    let Some(line) = lines.get(i) else { return 0 };
     let span = match lines.get(i + 1) {
         Some(next) => next.at_ms.saturating_sub(line.at_ms),
         None => LAST_LINE_MS,
     };
-    if span == 0 {
-        return 1.0;
+    (line.text.chars().count() as u64 * SING_MS_PER_CHAR).max(MIN_SING_MS).min(span)
+}
+
+/// The first `n` characters of `text`.
+pub fn first_chars(text: &str, n: usize) -> &str {
+    match text.char_indices().nth(n) {
+        Some((i, _)) => &text[..i],
+        None => text,
     }
-    let sing = (line.text.chars().count() as u64 * SING_MS_PER_CHAR).max(MIN_SING_MS).min(span);
-    (pos_ms.saturating_sub(line.at_ms) as f32 / sing as f32).clamp(0.0, 1.0)
 }
 
 /// How much a line `text_w` wide is scaled to fit in `avail`: 1 when it fits or the fit is not Shrink.
@@ -247,11 +271,7 @@ pub fn scroll_offset(overflow: f32, secs: f32) -> f32 {
 /// The part of `text` a typewriter has typed when it is `f` (0 to 1) of the way through.
 pub fn typed(text: &str, f: f32) -> &str {
     let total = text.chars().count();
-    let shown = ((total as f32 * f.clamp(0.0, 1.0)).ceil() as usize).min(total);
-    match text.char_indices().nth(shown) {
-        Some((i, _)) => &text[..i],
-        None => text,
-    }
+    first_chars(text, ((total as f32 * f.clamp(0.0, 1.0)).ceil() as usize).min(total))
 }
 
 #[cfg(test)]
@@ -335,6 +355,28 @@ mod tests {
         assert_eq!(scroll_offset(80.0, SCROLL_HOLD_S + 2.0 + 0.5), 80.0);
         let cycle = 2.0 * (SCROLL_HOLD_S + 2.0);
         assert!(scroll_offset(80.0, cycle - 0.1) < 80.0 / 4.0);
+    }
+
+    #[test]
+    fn the_highlight_is_none_line_or_words() {
+        let look = |h| Config { lyrics_highlight: h, ..Config::default() }.lyric_look();
+        assert!(!look(0).karaoke && !look(0).words);
+        assert!(look(1).karaoke && !look(1).words);
+        assert!(look(2).karaoke && look(2).words);
+        assert!(Config { lyrics_highlight: 2, ..Config::default() }.wants_word_timing());
+        assert!(!Config { lyrics_highlight: 1, ..Config::default() }.wants_word_timing());
+        let mut c = Config { lyrics_highlight: 9, ..Config::default() };
+        sanitize(&mut c);
+        assert_eq!(c.lyrics_highlight, 2);
+    }
+
+    #[test]
+    fn counts_characters_not_bytes() {
+        assert_eq!(first_chars("勘冴えて", 2), "勘冴");
+        assert_eq!(first_chars("ab", 5), "ab");
+        assert_eq!(first_chars("ab", 0), "");
+        assert_eq!(sing_ms(&lines(), 0), MIN_SING_MS);
+        assert_eq!(sing_ms(&lines(), 9), 0);
     }
 
     #[test]

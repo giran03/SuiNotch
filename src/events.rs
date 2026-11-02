@@ -42,6 +42,8 @@ impl MediaInfo {
 
 #[derive(Debug)]
 pub enum Event {
+    SoundImported { result: Result<crate::sound::CustomSound, String>, replacement: Option<String> },
+    SoundMessage(String),
     Media(Option<MediaInfo>),
     Artwork { key: u64, art: Option<crate::gfx::ArtPixels> },
     Lyrics { key: u64, found: Option<crate::lyrics::Found> },

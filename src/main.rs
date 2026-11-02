@@ -7,6 +7,7 @@ mod changelog;
 mod clips;
 mod config;
 mod dnd;
+mod dropped;
 mod events;
 mod feed;
 mod gfx;
@@ -36,7 +37,9 @@ mod timers;
 mod tooltips;
 mod tray;
 mod update;
+mod versions;
 mod views;
+mod words;
 
 use std::rc::Rc;
 use std::time::Instant;
@@ -112,6 +115,7 @@ fn run() -> windows::core::Result<()> {
         lyrics_source: None,
         lyrics_translation: Vec::new(),
         lyrics_romaji: Vec::new(),
+        lyrics_words: Vec::new(),
         recent: config::load_json("recent.json"),
         lyrics_requested: 0,
         lyrics_attempt: 0,
@@ -143,6 +147,7 @@ fn run() -> windows::core::Result<()> {
         if app.shelf.prune_missing() {
             app.save_shelf();
         }
+        dropped::sweep(&app.shelf);
         tray::add(app);
         notch::start(app);
     });

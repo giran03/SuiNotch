@@ -28,6 +28,7 @@ pub struct Config {
     pub tooltips: bool,
     pub mascot: bool,
     pub sounds: bool,
+    pub sound_library: crate::sound::Settings,
     pub hide_fullscreen: bool,
     /// Hold reminders while Windows is in Do Not Disturb, presenting or running a full-screen game.
     pub respect_quiet: bool,
@@ -159,6 +160,7 @@ impl Default for Config {
             tooltips: true,
             mascot: true,
             sounds: true,
+            sound_library: crate::sound::Settings::default(),
             hide_fullscreen: true,
             respect_quiet: true,
             sui_reactions: true,
@@ -170,7 +172,7 @@ impl Default for Config {
             expand_on_hover: true,
             hover_delay: 1,
             accent: 0,
-            accent_follow_system: false,
+            accent_follow_system: true,
             roundness: 1,
             notch_style: 0,
             notch_gap: DEFAULT_NOTCH_GAP,
@@ -333,6 +335,7 @@ impl Config {
 
     /// Clamps values that came from disk into the ranges the UI offers.
     pub fn sanitized(mut self) -> Self {
+        self.sound_library.sanitize();
         self.focus_min = self.focus_min.clamp(5, 120);
         self.short_break_min = self.short_break_min.clamp(1, 30);
         self.long_break_min = self.long_break_min.clamp(5, 60);

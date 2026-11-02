@@ -60,6 +60,8 @@ pub struct App {
     /// The lyrics in another language and in Latin letters, when the source has them.
     pub lyrics_translation: Vec<Line>,
     pub lyrics_romaji: Vec<Line>,
+    /// Word timing of each line of `lyrics`, where the song has it; empty when it has none.
+    pub lyrics_words: Vec<Vec<crate::words::Word>>,
     /// Songs played lately, newest first.
     pub recent: crate::recent::Recent,
     /// Track whose lyrics were last requested, so each song is looked up once.
@@ -100,6 +102,7 @@ pub enum Deferred {
     DragOut(Vec<usize>),
     DragClip(usize),
     OpenSettings(Option<usize>),
+    ImportSound(Option<String>),
     Exit,
 }
 
@@ -132,7 +135,8 @@ fn run_deferred() {
             Deferred::DragOut(indices) => crate::dnd::drag_out(indices),
             Deferred::DragClip(i) => crate::dnd::drag_clip(i),
             Deferred::OpenSettings(page) => crate::settings::open(page),
-            Deferred::Exit => unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) },
+            Deferred::ImportSound(replacement) => crate::settings::sounds::choose_file(replacement),
+            Deferred::Exit => { crate::sound::stop(); unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) } },
         }
     }
 }
@@ -234,6 +238,22 @@ impl App {
             4 => !self.lyrics_translation.is_empty() || !self.lyrics_romaji.is_empty(),
             _ => false,
         }
+    }
+
+    /// How many characters of lyric line `i` have been sung: by the song's own word timing where it has
+    /// that for the line, and by an estimate from the text where it does not.
+    pub fn sung_chars(&self, i: usize) -> f32 {
+        let pos = self.lyric_pos().unwrap_or(0);
+        if let Some(words) = self.lyrics_words.get(i).filter(|w| !w.is_empty()) {
+            return crate::words::sung_chars(words, pos);
+        }
+        let Some(line) = self.lyrics.get(i) else { return 0.0 };
+        crate::words::sung_chars(&crate::words::estimate(&line.text, line.at_ms, crate::lyric_style::sing_ms(&self.lyrics, i)), pos)
+    }
+
+    /// Whether the song on screen has word-by-word timing for any line.
+    pub fn has_word_timing(&self) -> bool {
+        self.lyrics_words.iter().any(|w| !w.is_empty())
     }
 
     pub fn current_line(&self) -> Option<usize> {

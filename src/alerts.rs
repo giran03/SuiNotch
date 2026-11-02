@@ -88,6 +88,7 @@ pub fn draw(cv: &mut Canvas, app: &mut App, body: R) {
 
 pub fn action(app: &mut App, primary: bool) {
     let Some((kind, _)) = app.notch.alert.take() else { return };
+    crate::sound::stop();
     let now = store::now();
     match kind {
         AlertKind::Todo(id) => {

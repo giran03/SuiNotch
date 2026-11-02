@@ -1,5 +1,5 @@
-//! Drag and drop for the shelf: files and text dropped on the notch are kept (by path, never
-//! copied), and items can be dragged back out into any app.
+//! Drag and drop for the shelf: files and text dropped on the notch are kept (by path, only files
+//! that exist inside another app are saved, see `dropped`), and items can be dragged back out into any app.
 
 use std::mem::ManuallyDrop;
 
@@ -30,7 +30,7 @@ pub struct DropTarget {
 }
 
 fn accepts(data: &IDataObject) -> bool {
-    unsafe { data.QueryGetData(&format(CF_HDROP)).is_ok() || data.QueryGetData(&format(CF_UNICODETEXT)).is_ok() }
+    unsafe { data.QueryGetData(&format(CF_HDROP)).is_ok() || crate::dropped::offers(data) || data.QueryGetData(&format(CF_UNICODETEXT)).is_ok() }
 }
 
 fn read(data: &IDataObject) -> (Vec<std::path::PathBuf>, Option<String>) {
@@ -39,8 +39,13 @@ fn read(data: &IDataObject) -> (Vec<std::path::PathBuf>, Option<String>) {
             let paths = sys::paths_from_hdrop(HDROP(medium.u.hGlobal.0));
             ReleaseStgMedium(&mut medium);
             if !paths.is_empty() {
-                return (paths, None);
+                return (crate::dropped::keep_transient(paths), None);
             }
+        }
+        // An image dragged out of a browser carries its bytes, which are better than its address.
+        let saved = crate::dropped::save(data);
+        if !saved.is_empty() {
+            return (saved, None);
         }
         if let Ok(mut medium) = data.GetData(&format(CF_UNICODETEXT)) {
             let ptr = GlobalLock(medium.u.hGlobal) as *const u16;
@@ -70,7 +75,8 @@ impl IDropTarget_Impl for DropTarget_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, p: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let ok = data.as_ref().is_some_and(accepts);
         let own = app::with(|app| {
-            if ok && app.cfg.shelf_open_on_drag {
+            // The notch's own drags (out of the shelf or clipboard) are not offered the shelf.
+            if ok && app.cfg.shelf_open_on_drag && !app.notch.own_drag {
                 app.notch.drag_over = true;
                 notch::request_frame(app);
             }
@@ -128,8 +134,8 @@ impl IDropTarget_Impl for DropTarget_Impl {
             };
             if added {
                 app.save_shelf();
-                let max = crate::views::shelf_overflow(app);
-                app.notch.shelf_scroll.set(max);
+                // New items are at the start of the shelf.
+                app.notch.shelf_scroll.set(0.0);
             }
             notch::set_page(app, Page::Shelf);
             notch::expand(app);
@@ -197,7 +203,10 @@ pub fn drag_clip(i: usize) {
     use crate::clips::Clip;
     let Some((hwnd, clip)) = app::with(|app| {
         app.notch.own_drag = true;
-        (app.notch.hwnd, app.clips.items.get(i).cloned())
+        let clip = app.clips.items.get(i).cloned();
+        // Out of the way, so the drop target underneath is visible.
+        notch::collapse(app);
+        (app.notch.hwnd, clip)
     }) else {
         return;
     };
@@ -222,6 +231,8 @@ pub fn drag_out(indices: Vec<usize>) {
     let Some((hwnd, items)) = app::with(|app| {
         app.notch.own_drag = true;
         let items: Vec<ShelfItem> = indices.iter().filter_map(|&i| app.shelf.items.get(i).cloned()).collect();
+        // Out of the way, so the drop target underneath is visible.
+        notch::collapse(app);
         (app.notch.hwnd, items)
     }) else {
         return;

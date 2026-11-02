@@ -1,4 +1,4 @@
-"""Packs brand/icons/app-<size>.png into brand/icons/suinotch.ico (PNG-compressed entries).
+"""Packs transparent app PNGs into brand/icons/suinotch.ico and assets/suinotch.ico.
 
 Sizes up to 32 px come from the small-size cut, larger ones from the full mark; see build_brand.py.
 Run: python -I brand/pack_ico.py
@@ -23,6 +23,7 @@ def main():
         offset += len(data)
     out = ICONS / "suinotch.ico"
     out.write_bytes(header + entries + blobs)
+    (ICONS.parent.parent / "assets" / "suinotch.ico").write_bytes(header + entries + blobs)
     print(f"wrote {out} ({len(images)} sizes, {out.stat().st_size} bytes)")
 
 

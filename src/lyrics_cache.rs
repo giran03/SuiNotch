@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::data_dir;
 use crate::lrc::Line;
 use crate::lyrics::{Found, Source};
+use crate::words::Word;
 
 const DIR: &str = "lyrics_cache";
 const MAX_FILES: usize = 400;
@@ -26,6 +27,17 @@ struct Entry {
     translation: Vec<(u64, String)>,
     #[serde(default)]
     romaji: Vec<(u64, String)>,
+    /// Per line, its words as (start ms, duration ms, characters); empty when the song has no word timing.
+    #[serde(default)]
+    words: Vec<Vec<(u64, u64, usize)>>,
+}
+
+fn words_to_tuples(words: &[Vec<Word>]) -> Vec<Vec<(u64, u64, usize)>> {
+    words.iter().map(|line| line.iter().map(|w| (w.start_ms, w.dur_ms, w.chars)).collect()).collect()
+}
+
+fn words_from_tuples(words: Vec<Vec<(u64, u64, usize)>>) -> Vec<Vec<Word>> {
+    words.into_iter().map(|line| line.into_iter().map(|(start_ms, dur_ms, chars)| Word { start_ms, dur_ms, chars }).collect()).collect()
 }
 
 fn to_pairs(lines: &[Line]) -> Vec<(u64, String)> {
@@ -60,6 +72,7 @@ pub fn load(key: u64, duration_ms: u64) -> Option<Found> {
         synced: entry.synced,
         translation: from_pairs(entry.translation),
         romaji: from_pairs(entry.romaji),
+        words: words_from_tuples(entry.words),
     })
 }
 
@@ -71,6 +84,7 @@ pub fn store(key: u64, duration_ms: u64, found: &Found) {
         lines: to_pairs(&found.lines),
         translation: to_pairs(&found.translation),
         romaji: to_pairs(&found.romaji),
+        words: words_to_tuples(&found.words),
     };
     let Ok(text) = serde_json::to_string(&entry) else { return };
     if let Err(e) = std::fs::create_dir_all(dir()).and_then(|_| std::fs::write(path(key), text)) {
@@ -137,8 +151,10 @@ mod tests {
             lines: vec![(500, "hi".into())],
             translation: vec![(500, "salut".into())],
             romaji: Vec::new(),
+            words: words_to_tuples(&[vec![Word { start_ms: 500, dur_ms: 120, chars: 2 }]]),
         };
         let back: Entry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(words_from_tuples(back.words.clone()), vec![vec![Word { start_ms: 500, dur_ms: 120, chars: 2 }]]);
         assert_eq!((back.source, back.synced, back.lines), (Source::Netease, true, vec![(500, "hi".to_string())]));
         assert_eq!(back.translation, vec![(500, "salut".to_string())]);
     }
@@ -147,6 +163,6 @@ mod tests {
     fn entries_saved_before_translations_still_load() {
         let old = r#"{"source":"Lrclib","synced":true,"duration_ms":1000,"lines":[[1,"a"]]}"#;
         let e: Entry = serde_json::from_str(old).unwrap();
-        assert!(e.translation.is_empty() && e.romaji.is_empty());
+        assert!(e.translation.is_empty() && e.romaji.is_empty() && e.words.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 //! Settings search: an index of every setting by the page it lives on, matched against what is typed.
 //! A test keeps the labels here in step with the ones the pages draw.
 
-use super::{ABOUT_PAGE, CATEGORIES, DIAG_PAGE};
+use super::{ABOUT_PAGE, CATEGORIES, DIAG_PAGE, SOUNDS_PAGE};
 
 pub(super) struct Entry {
     pub page: usize,
@@ -15,6 +15,14 @@ const fn e(page: usize, label: &'static str, keywords: &'static str) -> Entry {
 }
 
 pub(super) const INDEX: &[Entry] = &[
+    e(SOUNDS_PAGE, "Sound volume", "audio loudness mute"),
+    e(SOUNDS_PAGE, "Import sound", "custom upload wav mp3 ogg file ringtone"),
+    e(SOUNDS_PAGE, "Repeat timer sound", "alarm loop ringing"),
+    e(SOUNDS_PAGE, "Pause between rings", "alarm interval gap"),
+    e(SOUNDS_PAGE, "Stop ringing after", "alarm maximum duration"),
+    e(SOUNDS_PAGE, "Gradual volume", "alarm fade increase"),
+    e(SOUNDS_PAGE, "Restore sound defaults", "reset assignments presets"),
+    e(0, "Sound library", "audio notifications presets custom"),
     e(0, "Start with Windows", "startup boot login launch autostart"),
     e(0, "Music", "page tab notch show hide"),
     e(0, "Focus", "page tab notch show hide pomodoro"),
@@ -52,7 +60,7 @@ pub(super) const INDEX: &[Entry] = &[
     e(3, "Lyric preset", "style look pill in the notch text only karaoke glow display custom"),
     e(3, "Placement", "lyrics under in the notch title position"),
     e(3, "Backdrop", "lyrics pill background tint black none shadow"),
-    e(3, "Highlight", "lyrics karaoke fill sung colour"),
+    e(3, "Highlight", "lyrics karaoke fill sung colour words word by word syllable line"),
     e(3, "Text colour", "lyrics color album accent white"),
     e(3, "Text size", "lyrics font small large"),
     e(3, "New lines", "lyrics animation slide fade typewriter enter"),
@@ -64,9 +72,10 @@ pub(super) const INDEX: &[Entry] = &[
     e(3, "Artwork glow", "cover album tint colour"),
     e(3, "Show player name", "spotify apple music source"),
     e(3, "Lyrics come from LRCLIB", "privacy source service"),
-    e(3, "Fall back to NetEase", "privacy source service backup"),
+    e(3, "Fall back to other services", "privacy source service backup netease apple"),
     e(3, "Keep lyrics on this PC", "cache offline save disk"),
     e(3, "Clear saved lyrics", "cache delete remove"),
+    e(ABOUT_PAGE, "Reset all settings", "default factory restore fresh"),
     e(3, "Clear recently played", "history delete remove songs"),
     e(4, "Snooze for", "reminder time's up"),
     e(4, "Show completed tasks", "done finished crossed"),
@@ -149,7 +158,7 @@ mod tests {
 
     #[test]
     fn every_label_is_one_the_pages_draw() {
-        let drawn = [include_str!("pages.rs"), include_str!("../notch/kinds.rs")].join("\n");
+        let drawn = [include_str!("pages.rs"), include_str!("sounds.rs"), include_str!("../notch/kinds.rs")].join("\n");
         for entry in INDEX {
             assert!(drawn.contains(&format!("\"{}\"", entry.label)), "no page draws \"{}\"", entry.label);
             assert!(entry.page < CATEGORIES.len() || entry.page == DIAG_PAGE, "{} points at a missing page", entry.label);

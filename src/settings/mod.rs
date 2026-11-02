@@ -29,15 +29,17 @@ mod diag;
 mod pages;
 mod preview;
 mod search;
+pub(crate) mod sounds;
 
 use controls::*;
 use preview::ROW_PREVIEW;
 
-pub const ABOUT_PAGE: usize = 11;
+pub const SOUNDS_PAGE: usize = 11;
+pub const ABOUT_PAGE: usize = 12;
 /// "What's new": reached from About, so it has no sidebar entry of its own.
-pub const CHANGELOG_PAGE: usize = 12;
+pub const CHANGELOG_PAGE: usize = 13;
 /// Diagnostics: also reached from About.
-pub const DIAG_PAGE: usize = 13;
+pub const DIAG_PAGE: usize = 14;
 /// Longest text the search box takes.
 const MAX_QUERY_CHARS: usize = 40;
 pub const DEVELOPER: &str = "CafeTako";
@@ -62,7 +64,7 @@ struct Category {
     tile: u32,
 }
 
-const CATEGORIES: [Category; 12] = [
+const CATEGORIES: [Category; 13] = [
     Category { name: "General", glyph: icon::SETTINGS, tile: 0x8E8E93 },
     Category { name: "Display", glyph: icon::DISPLAY, tile: 0x5E5CE6 },
     Category { name: "Appearance", glyph: icon::COLOR, tile: 0x3A3A3C },
@@ -74,6 +76,7 @@ const CATEGORIES: [Category; 12] = [
     Category { name: "Shelf", glyph: icon::FOLDER, tile: 0xF5B400 },
     Category { name: "Clipboard", glyph: icon::CLIPBOARD, tile: 0xBF5AF2 },
     Category { name: "HUD and popups", glyph: icon::BELL, tile: 0x32ADE6 },
+    Category { name: "Sounds", glyph: icon::BELL, tile: 0xA78BFA },
     Category { name: "About", glyph: icon::INFO, tile: 0x636366 },
 ];
 
@@ -83,6 +86,7 @@ type NumField = fn(&mut Config) -> &mut u32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Act {
+    Sound(sounds::Action),
     Page(usize),
     /// An in-page button that switches pages (scrolls with the content, unlike the sidebar).
     Link(usize),
@@ -112,6 +116,8 @@ enum Act {
     OpenData,
     ClearShelf,
     ResetWater,
+    /// Put every setting back to a fresh install's; the first press only asks to be pressed again.
+    ResetAll,
     Website,
     Support,
     Coffee,
@@ -136,6 +142,9 @@ pub struct SettingsWindow {
     query: String,
     /// Troubleshooting details for the Diagnostics page, taken when it opens or is refreshed.
     diag: diag::Diag,
+    /// Reset all settings was pressed once and waits for a second press.
+    confirm_reset: bool,
+    sound: sounds::State,
     /// Roundness step the window corners were last set for.
     corners: usize,
     mouse: (f32, f32),
@@ -150,6 +159,7 @@ pub fn open(page: Option<usize>) {
     if let Some(hwnd) = existing {
         app::with(|app| {
             if let (Some(s), Some(p)) = (app.settings.as_mut(), page) {
+                if p != SOUNDS_PAGE { s.sound.leave(); }
                 s.page = p;
                 s.scroll.snap(0.0);
             }
@@ -183,6 +193,8 @@ pub fn open(page: Option<usize>) {
             monitors: sys::monitors(),
             query: String::new(),
             diag: diag::Diag::default(),
+            confirm_reset: false,
+            sound: sounds::State::default(),
             corners: usize::MAX,
             mouse: (-1.0, -1.0),
             last: Instant::now(),
@@ -233,6 +245,7 @@ fn create_window() -> Result<HWND> {
             Some(hinst.into()),
             None,
         )?;
+        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
         let dark: BOOL = true.into();
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
@@ -249,6 +262,7 @@ pub fn refresh(app: &App) {
 }
 
 fn close(app: &mut App) {
+    crate::sound::stop_preview();
     if let Some(s) = app.settings.take() {
         unsafe {
             let _ = DestroyWindow(s.hwnd);
@@ -273,6 +287,13 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
     let scale = app.settings.as_ref().map(|s| s.scale).unwrap_or(1.0);
     let pt = |lp: LPARAM| ((lp.0 & 0xffff) as i16 as f32 / scale, ((lp.0 >> 16) & 0xffff) as i16 as f32 / scale);
     match msg {
+        WM_DROPFILES => {
+            let drop = windows::Win32::UI::Shell::HDROP(wparam.0 as *mut _);
+            let paths = sys::paths_from_hdrop(drop);
+            unsafe { windows::Win32::UI::Shell::DragFinish(drop); }
+            sounds::drop_files(app, paths);
+            Some(LRESULT(0))
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             unsafe { BeginPaint(hwnd, &mut ps) };
@@ -363,6 +384,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             Some(LRESULT(0))
         }
         WM_KEYDOWN => {
+            if sounds::key(app, wparam.0 as u16) { return Some(LRESULT(0)); }
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let s = app.settings.as_mut()?;
             match vk {
@@ -372,6 +394,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
                 VK_ESCAPE => close(app),
                 VK_UP | VK_DOWN => {
+                    s.sound.leave();
                     let n = CATEGORIES.len() as i32;
                     let d = if vk == VK_UP { -1 } else { 1 };
                     s.page = ((s.page.min(ABOUT_PAGE) as i32 + d).rem_euclid(n)) as usize;
@@ -383,6 +406,7 @@ fn handle(app: &mut App, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             Some(LRESULT(0))
         }
         WM_CHAR => {
+            if sounds::character(app, wparam.0 as u32) { return Some(LRESULT(0)); }
             // Typing anywhere in the window goes to the search box.
             let s = app.settings.as_mut()?;
             match wparam.0 as u32 {
@@ -420,13 +444,24 @@ fn invalidate(s: &SettingsWindow) {
 
 fn act(app: &mut App, a: Act) {
     let mut c = app.cfg.clone();
+    // Any other press cancels a reset that was waiting to be confirmed.
+    if a != Act::ResetAll {
+        if let Some(s) = app.settings.as_mut().filter(|s| s.confirm_reset) {
+            s.confirm_reset = false;
+            invalidate(s);
+        }
+    }
     match a {
+        Act::Sound(action) => { sounds::act(app, action); return; }
         Act::Page(_) | Act::Link(_) | Act::Found(_) => {
             let p = match a {
                 Act::Page(p) | Act::Link(p) => p,
                 Act::Found(i) => search::INDEX.get(i).map_or(0, |e| e.page),
                 _ => unreachable!(),
             };
+            if p != SOUNDS_PAGE {
+                if let Some(s) = app.settings.as_mut() { s.sound.leave(); }
+            }
             let snapshot = (p == DIAG_PAGE).then(|| diag::snapshot(app));
             if let Some(s) = app.settings.as_mut() {
                 s.page = p;
@@ -577,8 +612,31 @@ fn act(app: &mut App, a: Act) {
             app.shelf.items.clear();
             app.notch.bitmaps.clear();
             app.save_shelf();
+            crate::dropped::sweep(&app.shelf);
             crate::notch::notice(app, "Shelf cleared");
             return;
+        }
+        Act::ResetAll => {
+            let armed = app.settings.as_ref().is_some_and(|s| s.confirm_reset);
+            if let Some(s) = app.settings.as_mut() {
+                s.confirm_reset = !armed;
+                invalidate(s);
+            }
+            if !armed {
+                return;
+            }
+            // A fresh install's settings; only the release notes already seen stay, so they do not reopen.
+            c = config::Config { notes_seen: c.notes_seen.clone(), ..config::Config::default() };
+            // Imported audio is user data, like shelf files, rather than a setting to discard.
+            c.sound_library.custom = app.cfg.sound_library.custom.clone();
+            if !c.calendar_url.is_empty() || !app.cfg.calendar_url.is_empty() {
+                app.calendar.clear();
+                app.calendar_error.clear();
+                app.calendar_synced = None;
+                crate::feed::set_url(String::new());
+            }
+            crate::media::forget_preferred();
+            crate::notch::notice(app, "Settings reset");
         }
         Act::ResetWater => {
             let now = crate::store::now();

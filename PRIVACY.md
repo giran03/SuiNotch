@@ -10,6 +10,8 @@ Clipboard history is saved in `%APPDATA%\SuiNotch` (`clips.json`, with copied im
 
 Song details and playback state come from Windows' own media controls and are only shown in the notch.
 
+Imported reminder sounds are copied into the `sounds` folder in `%APPDATA%\SuiNotch`. Sound names, clip boundaries, volume and reminder assignments are saved with your settings. Imports and audio processing stay on your PC. Delete an imported sound in Settings > Sounds to remove its local copy.
+
 ## What leaves your PC
 
 SuiNotch makes only these network requests:

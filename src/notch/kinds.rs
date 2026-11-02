@@ -155,6 +155,11 @@ pub enum Hit {
     DueChip(u8),
     DueStep(i8),
     DueClear,
+    DueEnable,
+    DueTime,
+    TodoCalendar,
+    TodoAll,
+    TodoDayStep(i8),
     ShowDone,
     CalPrev,
     CalNext,
@@ -170,6 +175,15 @@ pub enum Hit {
 pub enum EditTarget {
     NewTask,
     Rename(u64),
+    ReminderTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskDraft {
+    pub field: TextField,
+    pub day: Option<NaiveDate>,
+    pub due: Option<i64>,
+    pub color: usize,
 }
 
 #[derive(Clone, Debug)]

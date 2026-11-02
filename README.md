@@ -133,7 +133,9 @@ with barely any CPU.
 
 #### 🎨 Yours to tune
 Size, display, accent colour, roundness and animation style. Every feature can be turned on
-or off.
+or off. Choose from eight reminder sounds or import WAV, MP3 and OGG audio in
+[Settings > Sounds](docs/sounds.md). Preview, trim and assign sounds to individual
+reminders, with optional repeating timer alerts.
 
 </td>
 <td width="33%" valign="top">

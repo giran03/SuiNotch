@@ -123,6 +123,22 @@ pub(super) fn on_button_down(app: &mut App, x: f32, y: f32) {
     request_frame(app);
 }
 
+pub(super) fn on_double_click(app: &mut App, x: f32, y: f32) {
+    if app.notch.expanded && app.notch.shown_page() == Page::Calendar {
+        if let Some(Hit::CalDay(day)) = app.notch.hit_at(x, y) {
+            // Reuse Calendar's Add flow, including date context and draft restoration.
+            // Consume the second press so its release cannot activate the new page.
+            app.notch.pressed = None;
+            app.notch.cal_sel = day;
+            views::click(app, Hit::CalAdd, (false, false));
+            return;
+        }
+    }
+    // Windows replaces the second button-down with DBLCLK. Other controls still
+    // need that press to retain their normal repeated-click behavior.
+    on_button_down(app, x, y);
+}
+
 pub(super) fn on_button_up(app: &mut App, x: f32, y: f32) {
     unsafe {
         let _ = ReleaseCapture();
@@ -151,7 +167,7 @@ pub(super) fn on_button_up(app: &mut App, x: f32, y: f32) {
     if !app.notch.expanded && hit.is_some_and(|h| h == Hit::Body) && app.notch.alert.is_none() {
         expand(app);
     }
-    if app.notch.field.is_some() || app.notch.page == Page::Todo {
+    if app.notch.page == Page::Todo {
         unsafe {
             let _ = SetForegroundWindow(app.notch.hwnd);
         }
@@ -189,7 +205,19 @@ pub(super) fn on_wheel(app: &mut App, delta: i16, horizontal: bool) {
 }
 
 pub(super) fn on_key(app: &mut App, vk: VIRTUAL_KEY) {
-    if app.notch.field.is_some() {
+    if !app.notch.expanded {
+        return;
+    }
+    if app.notch.page == Page::Todo && app.notch.field.is_some() {
+        let selected = app.notch.time_select_all && app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime);
+        if selected && matches!(vk, VK_LEFT | VK_RIGHT | VK_HOME | VK_END | VK_DELETE) {
+            let field = app.notch.field.as_mut().unwrap();
+            if vk == VK_DELETE { field.text.clear(); }
+            field.caret = if matches!(vk, VK_LEFT | VK_HOME | VK_DELETE) { 0 } else { field.text.chars().count() };
+            app.notch.time_select_all = false;
+            request_frame(app);
+            return;
+        }
         let f = app.notch.field.as_mut().expect("field");
         let len = f.text.chars().count();
         match vk {
@@ -203,12 +231,21 @@ pub(super) fn on_key(app: &mut App, vk: VIRTUAL_KEY) {
                 f.text = chars.into_iter().collect();
             }
             VK_RETURN => {
+                let renaming = matches!(f.target, EditTarget::Rename(_));
                 commit_field(app);
-                if matches!(app.notch.field.as_ref().map(|f| &f.target), Some(EditTarget::Rename(_))) {
+                if renaming {
                     app.notch.field = None;
                 }
             }
-            VK_ESCAPE => app.notch.field = None,
+            VK_ESCAPE => {
+                if f.target == EditTarget::ReminderTime {
+                    cancel_time_edit(app);
+                } else {
+                    app.notch.field = None;
+                    app.notch.new_due = None;
+                    app.notch.task_error = None;
+                }
+            }
             _ => {}
         }
         request_frame(app);
@@ -233,8 +270,23 @@ pub(super) fn on_key(app: &mut App, vk: VIRTUAL_KEY) {
 }
 
 pub(super) fn on_char(app: &mut App, ch: u16) {
+    if !app.notch.expanded || app.notch.page != Page::Todo {
+        return;
+    }
     let Some(f) = app.notch.field.as_mut() else { return };
     let Some(c) = char::from_u32(ch as u32) else { return };
+    if f.target == EditTarget::ReminderTime {
+        if c == '\u{1}' {
+            app.notch.time_select_all = true;
+            request_frame(app);
+            return;
+        }
+        if app.notch.time_select_all && (!c.is_control() || matches!(c, '\u{8}' | '\u{16}')) {
+            f.text.clear();
+            f.caret = 0;
+            app.notch.time_select_all = false;
+        }
+    }
     let mut chars: Vec<char> = f.text.chars().collect();
     match c {
         '\u{8}' => {
@@ -294,10 +346,22 @@ pub fn commit_field(app: &mut App) {
     let Some(f) = app.notch.field.clone() else { return };
     match f.target {
         EditTarget::NewTask => {
+            if f.text.trim().is_empty() {
+                return;
+            }
             let due = app.notch.new_due;
-            if app.todos.add(&f.text, due, app.notch.new_color).is_some() {
+            if due.is_some_and(|due| due <= store::now()) {
+                app.notch.task_error = Some("The reminder has passed; choose a future time or turn it off".into());
+                return;
+            }
+            if let Some(id) = app.todos.add(&f.text, due, app.notch.new_color) {
+                if let Some(day) = app.notch.task_day {
+                    app.todos.get_mut(id).unwrap().scheduled_day = Some(day);
+                }
                 app.notch.field = Some(TextField { target: EditTarget::NewTask, text: String::new(), caret: 0 });
                 app.notch.new_due = None;
+                app.notch.due_edit = None;
+                app.notch.task_error = None;
                 app.save_todos();
                 schedule(app);
                 let max = views::todo_overflow(app);
@@ -307,6 +371,22 @@ pub fn commit_field(app: &mut App) {
         EditTarget::Rename(id) => {
             app.todos.rename(id, &f.text);
             app.save_todos();
+        }
+        EditTarget::ReminderTime => {
+            let day = views::reminder_day(app)
+                .or_else(|| views::current_due(app).map(store::day_of))
+                .unwrap_or_else(|| store::day_of(store::now()));
+            let result = parse_time(&f.text)
+                .ok_or("Enter a valid time, such as 09:00 or 2:30 pm")
+                .and_then(|(hour, minute)| reminder_at(day, hour, minute, store::now()));
+            match result {
+                Ok(due) => {
+                    views::apply_due(app, Some(due));
+                    app.notch.field = app.notch.time_return.take();
+                    app.notch.time_select_all = false;
+                }
+                Err(error) => app.notch.task_error = Some(error.into()),
+            }
         }
     }
 }

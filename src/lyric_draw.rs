@@ -26,6 +26,15 @@ pub fn clock_secs() -> f32 {
     START.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
+/// How much of a line has been sung, for the karaoke fill.
+#[derive(Clone, Copy, Debug)]
+pub enum Fill {
+    /// This fraction (0 to 1) of the line's width, spread evenly.
+    Even(f32),
+    /// This many characters of the line, with a fraction for the one being sung.
+    Chars(f32),
+}
+
 /// One lyric line, as it is to be drawn this frame.
 pub struct Frame<'a> {
     pub text: &'a str,
@@ -33,8 +42,7 @@ pub struct Frame<'a> {
     pub look: Look,
     /// How far the line has entered, 0 to 1.
     pub fade: f32,
-    /// How much of the line has been sung, 0 to 1, for the karaoke fill.
-    pub sung: f32,
+    pub fill: Fill,
     /// Seconds since the line appeared, for scrolling.
     pub secs: f32,
     /// The album's colour, when there is a cover, and the accent.
@@ -85,7 +93,7 @@ struct Run {
     /// Left-aligned in its rectangle rather than centred.
     left: bool,
     /// The karaoke fill, when this run has one.
-    sung: Option<f32>,
+    sung: Option<Fill>,
     /// A soft shadow, for text with no pill behind it.
     shadow: bool,
     /// Extra transparency on top of the frame's.
@@ -128,8 +136,12 @@ fn draw_run(cv: &mut Canvas, f: &Frame, rect: R, text: &str, run: &Run) {
         Some(sung) => {
             // The line sits dim, and a bright copy is revealed from the left as it is sung.
             cv.text(shown, at, size, run.weight, C::WHITE.a(0.4 * a), Align::Left);
-            let reach = if scrolling { tw } else { visible };
-            cv.push_clip_rect(R::new(x0 - 2.0, band.y, reach * sung + 2.0, band.h));
+            let whole = if scrolling { tw } else { visible };
+            let reach = match sung {
+                Fill::Even(f) => whole * f.clamp(0.0, 1.0),
+                Fill::Chars(n) => chars_width(cv, text, n, size, run.weight).min(whole),
+            };
+            cv.push_clip_rect(R::new(x0 - 2.0, band.y, reach + 2.0, band.h));
             cv.text(shown, at, size, run.weight, run.color.a(a), Align::Left);
             cv.pop();
         }
@@ -140,13 +152,34 @@ fn draw_run(cv: &mut Canvas, f: &Frame, rect: R, text: &str, run: &Run) {
     }
 }
 
+/// The width of the first `n` characters of `text` (a fraction of one counting part of its width), at `size`.
+fn chars_width(cv: &Canvas, text: &str, n: f32, size: f32, weight: i32) -> f32 {
+    let whole = n.max(0.0).floor() as usize;
+    let upto = |k: usize| cv.gfx.text_width(lyric_style::first_chars(text, k), size, weight);
+    let before = if whole == 0 { 0.0 } else { upto(whole) };
+    if whole >= text.chars().count() {
+        return before;
+    }
+    before + (n - whole as f32) * (upto(whole + 1) - before)
+}
+
+/// A left-aligned line of text with `sung` characters of it filled in `color` over a dim copy: the
+/// word highlight on the lyrics panel's current line.
+pub fn draw_filled(cv: &mut Canvas, rect: R, text: &str, size: f32, weight: i32, color: C, sung: f32) {
+    let reach = chars_width(cv, text, sung, size, weight).min(rect.w);
+    cv.text(text, rect, size, weight, C::WHITE.a(0.4), Align::Left);
+    cv.push_clip_rect(R::new(rect.x - 2.0, rect.y - 4.0, reach + 2.0, rect.h + 8.0));
+    cv.text(text, rect, size, weight, color, Align::Left);
+    cv.pop();
+}
+
 fn first_run(f: &Frame, shadow: bool, left: bool) -> Run {
     Run {
         size: f.look.font(),
         weight: FIRST_WEIGHT,
         color: f.text_color(),
         left,
-        sung: f.look.karaoke.then_some(f.sung),
+        sung: f.look.karaoke.then_some(f.fill),
         shadow,
         alpha: 1.0,
     }
