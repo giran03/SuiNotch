@@ -2,6 +2,12 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.3] - 2026-11-02
+
+### Added
+- Reminder sounds with imports, word-by-word lyrics, calendar tasks, browser image drops and settings reset (bde0772)
+- Lyrics fallback, look options, second line, tooltips and settings tools (6e3335f)
+
 ## [1.0.2] - 2026-10-30
 
 ### Added
