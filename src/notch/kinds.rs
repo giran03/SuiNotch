@@ -14,6 +14,8 @@ pub enum Page {
     Todo,
     Calendar,
     Stats,
+    /// Temporary page; not part of the configurable permanent pages in ALL.
+    Updates,
 }
 
 impl Page {
@@ -29,6 +31,7 @@ impl Page {
             Page::Todo => "todo",
             Page::Calendar => "calendar",
             Page::Stats => "stats",
+            Page::Updates => "updates",
         }
     }
 
@@ -43,6 +46,7 @@ impl Page {
             Page::Todo => icon::CHECK,
             Page::Calendar => icon::CALENDAR,
             Page::Stats => icon::CHART,
+            Page::Updates => '\u{E895}',
         }
     }
     pub fn label(self) -> &'static str {
@@ -55,6 +59,7 @@ impl Page {
             Page::Todo => "To-do",
             Page::Calendar => "Calendar",
             Page::Stats => "Stats",
+            Page::Updates => "Updates",
         }
     }
     /// Expanded size in DIPs.
@@ -68,6 +73,7 @@ impl Page {
             Page::Todo => (600.0, 250.0),
             Page::Calendar => (640.0, 268.0),
             Page::Stats => (600.0, 226.0),
+            Page::Updates => (600.0, 236.0),
         }
     }
 }
@@ -99,6 +105,10 @@ pub enum AlertKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hit {
+    UpdateAction,
+    DebugUpdateNext,
+    DebugUpdateClose,
+    UpdateNotes,
     Body,
     PageDot(Page),
     Settings,
@@ -116,6 +126,10 @@ pub enum Hit {
     LyricsEarlier,
     LyricsLater,
     LyricsRetry,
+    /// The lyrics on show are wrong for this song: never offer them again, and look for others.
+    LyricsWrong,
+    /// Keep the lyrics on show for this song through later lookups, or stop keeping them.
+    LyricsKeep,
     /// Cycles what the lyrics panel shows under each line: nothing, romaji, a translation.
     LyricsAlt,
     /// Swaps the lyrics panel for the list of songs played lately.

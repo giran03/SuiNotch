@@ -2,10 +2,11 @@
 use super::*;
 use crate::config;
 
-fn fixture() -> App {
+pub(crate) fn fixture() -> App {
     use std::rc::Rc;
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-    assert!(config::data_dir().parent().unwrap().ends_with("calendar-task-test"), "Run with APPDATA pointing to a disposable calendar-task-test directory");
+    let isolated = config::data_dir();
+    assert!(["calendar-task-test", "update-tab-test", "lyrics-toggle-test"].iter().any(|name| isolated.parent().unwrap().ends_with(name)), "Run with APPDATA pointing to a disposable calendar-task-test, update-tab-test or lyrics-toggle-test directory");
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap(); }
     let cfg = Config { respect_quiet: false, water_enabled: false, ..Config::default() };
     let durations = crate::app::durations(&cfg);
@@ -26,7 +27,8 @@ fn fixture() -> App {
         lyrics_romaji: Vec::new(),
         lyrics_words: Vec::new(),
         recent: crate::recent::Recent::default(),
-        lyrics_requested: 0,
+        history: Default::default(),
+        lyric_request: Default::default(),
         lyrics_attempt: 0,
         shifts: crate::lyrics::Shifts::default(),
         pomo: crate::pomodoro::Pomodoro::new(&durations),

@@ -8,7 +8,7 @@ use crate::lrc::Line;
 pub const PRESET_LABELS: [&str; 6] = ["Pill", "In the notch", "Text only", "Karaoke", "Glow", "Custom"];
 /// The preset index that stands for "the choices match no preset".
 pub const CUSTOM_PRESET: usize = 5;
-pub const PLACE_LABELS: [&str; 2] = ["Under the notch", "In the notch"];
+pub const PLACE_LABELS: [&str; 3] = ["Under the notch", "In the notch", "Both"];
 pub const BACKDROP_LABELS: [&str; 3] = ["Black pill", "Album tint", "None"];
 pub const HIGHLIGHT_LABELS: [&str; 3] = ["None", "Line", "Words"];
 pub const COLOR_LABELS: [&str; 3] = ["Album tint", "White", "Accent"];
@@ -18,6 +18,16 @@ pub const FIT_LABELS: [&str; 3] = ["Shrink", "Scroll", "Cut"];
 pub const PAUSED_LABELS: [&str; 2] = ["Hide", "Keep dimmed"];
 pub const SECOND_LABELS: [&str; 5] = ["Off", "Next line", "Romaji", "Translation", "Auto"];
 pub const PANEL_ALT_LABELS: [&str; 3] = ["Off", "Romaji", "Translation"];
+
+/// The quick lyrics button cycles the existing visibility and placement settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LyricsMode {
+    #[default]
+    Off,
+    Outside,
+    Inside,
+    Both,
+}
 
 /// Space between the notch and the pill, and below the pill, so the window has some air around it.
 pub const ROOM_PAD: f32 = 14.0;
@@ -42,6 +52,8 @@ pub enum Place {
     Under,
     /// The line takes the song title's place inside the closed notch.
     InNotch,
+    /// The current line appears inside the notch and below it simultaneously.
+    Both,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +137,11 @@ impl Look {
     }
 
     pub fn below_notch(&self) -> bool {
-        self.place == Place::Under
+        matches!(self.place, Place::Under | Place::Both)
+    }
+
+    pub fn in_notch(&self) -> bool {
+        matches!(self.place, Place::InNotch | Place::Both)
     }
 
     /// Whether the pill shape is drawn behind the text.
@@ -144,9 +160,26 @@ impl Look {
 }
 
 impl Config {
+    pub fn lyrics_mode(&self) -> LyricsMode {
+        if !self.lyrics_pill { LyricsMode::Off }
+        else if self.lyrics_place == 2 { LyricsMode::Both }
+        else if self.lyrics_place == 1 { LyricsMode::Inside }
+        else { LyricsMode::Outside }
+    }
+
+    pub fn cycle_lyrics_mode(&mut self) -> LyricsMode {
+        match self.lyrics_mode() {
+            LyricsMode::Off => { self.lyrics_pill = true; self.lyrics_place = 0; }
+            LyricsMode::Outside => { self.lyrics_place = 1; }
+            LyricsMode::Inside => { self.lyrics_place = 2; }
+            LyricsMode::Both => { self.lyrics_pill = false; }
+        }
+        self.lyrics_mode()
+    }
+
     pub fn lyric_look(&self) -> Look {
         Look {
-            place: if self.lyrics_place == 1 { Place::InNotch } else { Place::Under },
+            place: match self.lyrics_place { 1 => Place::InNotch, 2 => Place::Both, _ => Place::Under },
             backdrop: [Backdrop::Pill, Backdrop::Tint, Backdrop::None][self.lyrics_backdrop.min(2)],
             karaoke: self.lyrics_highlight >= 1,
             words: self.lyrics_highlight == 2,
@@ -277,6 +310,28 @@ pub fn typed(text: &str, f: f32) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_modes_cycle_in_order_and_persist_without_changing_the_look() {
+        let mut c = Config { lyrics_pill: false, lyrics_highlight: 1, lyrics_color: 2, lyrics_size: 2, ..Config::default() };
+        for expected in [LyricsMode::Outside, LyricsMode::Inside, LyricsMode::Both, LyricsMode::Off, LyricsMode::Outside] {
+            assert_eq!(c.cycle_lyrics_mode(), expected);
+            let restored: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+            c = restored.sanitized();
+            assert_eq!(c.lyrics_mode(), expected);
+            assert_eq!((c.lyrics_highlight, c.lyrics_color, c.lyrics_size), (1, 2, 2));
+        }
+    }
+
+    #[test]
+    fn both_placement_enables_two_renderers_and_reserves_pill_room() {
+        let c = Config { lyrics_place: 2, ..Config::default() }.sanitized();
+        let look = c.lyric_look();
+        assert_eq!(c.lyrics_mode(), LyricsMode::Both);
+        assert!(look.in_notch() && look.below_notch());
+        assert!(look.has_pill());
+        assert_eq!(look.room_below(44.0), 44.0 + ROOM_PAD);
+    }
 
     fn lines() -> Vec<Line> {
         vec![Line { at_ms: 1000, text: "a".into() }, Line { at_ms: 5000, text: "b".into() }]

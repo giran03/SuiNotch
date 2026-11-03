@@ -13,11 +13,18 @@ mod feed;
 mod gfx;
 mod ical;
 mod lrc;
+mod lrclib;
 mod localized;
 mod lyric_draw;
 mod lyric_style;
+mod lyric_filter;
 mod lyrics;
 mod lyrics_cache;
+mod lyrics_local;
+mod lyrics_log;
+mod lyrics_net;
+mod lyrics_prefetch;
+mod lyricsfile;
 mod mascot;
 mod media;
 mod netease;
@@ -28,6 +35,7 @@ mod profile;
 mod quiet;
 mod recent;
 mod settings;
+mod song_gate;
 mod sound;
 mod stats;
 mod store;
@@ -35,6 +43,7 @@ mod sys;
 mod ticker;
 mod timers;
 mod tooltips;
+mod track_history;
 mod tray;
 mod update;
 mod versions;
@@ -117,7 +126,8 @@ fn run() -> windows::core::Result<()> {
         lyrics_romaji: Vec::new(),
         lyrics_words: Vec::new(),
         recent: config::load_json("recent.json"),
-        lyrics_requested: 0,
+        history: config::load_json("transitions.json"),
+        lyric_request: Default::default(),
         lyrics_attempt: 0,
         shifts: config::load_json("lyrics.json"),
         pomo: pomodoro::Pomodoro::new(&durations),

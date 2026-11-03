@@ -61,7 +61,7 @@ the closed notch shows its cover and a live equaliser.
 <img src="docs/media/lyrics.jpg" alt="Synced lyrics">
 <h3>🎤 Synced lyrics</h3>
 Lyrics follow the song line by line, inside the notch or in a small pill that floats
-underneath it, so you can sing along without opening anything.
+underneath it, so you can sing along without opening anything. Automatic searches filter for likely songs, skipping podcasts, ads and videos; browsers require manual lookup, with saved per-player preferences. The next song's lyrics are fetched ahead, so they show the moment it starts, and your own .lrc files come first. See <a href="docs/lyric-filtering.md">lyric search filtering</a> and <a href="docs/lyrics-prefetch.md">lyrics fetching</a>.
 </td>
 </tr>
 <tr>
@@ -142,7 +142,8 @@ reminders, with optional repeating timer alerts.
 
 #### 🔄 Always current
 Updates install quietly while you're away from the PC, and a short "What's new" greets you
-after each one.
+after each one. A temporary Updates tab also lets you download now, install when ready,
+and retry interrupted updates. It disappears when the update is complete.
 
 </td>
 </tr>

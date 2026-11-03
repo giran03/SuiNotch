@@ -31,6 +31,13 @@ mod kinds;
 mod reminders;
 mod render;
 mod tasks;
+mod stacking;
+pub mod debug;
+use stacking::ensure_topmost;
+#[cfg(test)]
+mod update_test;
+#[cfg(test)]
+mod lyrics_test;
 
 pub use input::*;
 pub use kinds::*;
@@ -57,6 +64,7 @@ const T_IDLE: usize = 5;
 const T_DEMO: usize = 6;
 /// Checks which monitor the mouse is on, while "Follow the mouse" is chosen.
 const T_CURSOR: usize = 8;
+const T_ZORDER: usize = 9;
 const CURSOR_POLL_MS: u32 = 500;
 
 const LEAVE_DELAY_MS: u32 = 380;
@@ -75,10 +83,14 @@ pub struct Notch {
     pub radius: Spring,
     pub open: Spring,
     pub page: Page,
+    /// Page to return to when the temporary Updates page disappears.
+    update_return_page: Option<Page>,
+    pub update_preview: Option<debug::UpdatePreview>,
     pub page_pos: Spring,
     /// Space between the screen edge and the notch; only a floating notch has any.
     pub gap: Spring,
     pub pill_w: Spring,
+    pub pill_inline_w: f32,
     pub pill_alpha: Spring,
     pub pill_line: Option<usize>,
     pub line_fade: Spring,
@@ -204,9 +216,12 @@ impl Notch {
             radius: Spring::new(13.0, anim_r, anim_z.max(0.9)),
             open: Spring::new(0.0, anim_r * 0.9, 1.0),
             page: Notch::pages(cfg).first().copied().unwrap_or(Page::Music),
+            update_return_page: None,
+            update_preview: None,
             page_pos: Spring::new(0.0, 0.42, 0.88),
             gap: Spring::new(cfg.gap_px(), anim_r, 1.0),
             pill_w: Spring::new(0.0, 0.42, 0.8),
+            pill_inline_w: 0.0,
             pill_alpha: Spring::new(0.0, 0.3, 1.0),
             pill_line: None,
             line_fade: Spring::new(1.0, 0.28, 1.0),
@@ -236,7 +251,7 @@ impl Notch {
             task_day: None,
             task_drafts: Vec::new(),
             task_error: None,
-            lyrics_view: cfg.lyrics_auto,
+            lyrics_view: cfg.lyrics_auto && cfg.lyrics_pill,
             recent_view: false,
             volume_open: Spring::new(0.0, 0.3, 1.0),
             vol_drag: false,
@@ -345,8 +360,8 @@ fn target_shape(app: &App) -> (f32, f32, f32) {
     } else if app.media.is_some() {
         // Wide enough for the artwork, the song title and the equalizer; a lyric line shown inside
         // the notch widens it further.
-        let in_notch = !app.cfg.lyric_look().below_notch() && n.pill_alpha.target > 0.5;
-        let lyric_w = if in_notch { n.pill_w.target - 34.0 + IN_NOTCH_CHROME } else { 0.0 };
+        let in_notch = app.cfg.lyric_look().in_notch() && n.pill_alpha.target > 0.5;
+        let lyric_w = if in_notch { n.pill_inline_w + IN_NOTCH_CHROME } else { 0.0 };
         (lyric_w.clamp(360.0, MAX_IN_NOTCH_W), 32.0, 13.0)
     } else if app.focus_running() {
         (250.0, 32.0, 13.0)
@@ -398,6 +413,7 @@ fn plain_outline(cv: &Canvas, body: R, radius: f32, round_top: bool) -> Option<w
 // ------------------------------------------------------------------ state changes
 
 pub fn expand(app: &mut App) {
+    stacking::raise_for_interaction(app);
     if app.notch.expanded {
         return;
     }
@@ -410,6 +426,7 @@ pub fn expand(app: &mut App) {
 }
 
 pub fn collapse(app: &mut App) {
+    debug::close_updates(app);
     let n = &mut app.notch;
     if !n.expanded {
         return;
@@ -431,7 +448,14 @@ pub fn collapse(app: &mut App) {
 }
 
 pub fn set_page(app: &mut App, page: Page) {
+    if page == Page::Updates && !update_tab_visible(app) { return; }
+    if page != Page::Updates && app.notch.update_preview.take().is_some() {
+        app.notch.hits.clear();
+        app.notch.hover = None;
+        app.notch.pressed = None;
+    }
     if app.notch.page != page {
+        app.notch.update_return_page = if page == Page::Updates { Some(app.notch.page) } else { None };
         cancel_time_edit(app);
         if app.notch.field.as_ref().is_some_and(|f| matches!(f.target, EditTarget::Rename(_))) {
             commit_field(app);
@@ -497,6 +521,16 @@ pub fn notice(app: &mut App, text: &str) {
 }
 
 pub fn config_changed(app: &mut App, old: &Config) {
+    if !app.cfg.lyrics_pill { app.notch.lyrics_view = false; }
+    // A lookup ahead planned under the old choices must not run once any of them is turned off.
+    let c = &app.cfg;
+    let turned_off = |was: bool, now: bool| was && !now;
+    if turned_off(old.lyrics_pill, c.lyrics_pill) || turned_off(old.lyrics_prefetch, c.lyrics_prefetch) || turned_off(old.lyrics_cache, c.lyrics_cache)
+        || turned_off(old.lyrics_fallback, c.lyrics_fallback) || turned_off(old.lyrics_learn, c.lyrics_learn) || old.lyrics_sources != c.lyrics_sources
+    {
+        crate::lyrics_prefetch::cancel();
+    }
+    crate::lyric_filter::reconcile(app);
     if old.sounds != app.cfg.sounds || old.sound_library != app.cfg.sound_library || old.respect_quiet != app.cfg.respect_quiet { sound::stop(); }
     let (r, z) = app.cfg.animation();
     for s in [&mut app.notch.w, &mut app.notch.h] {
@@ -532,10 +566,8 @@ pub fn config_changed(app: &mut App, old: &Config) {
     // one on screen up again, keeping its lines on show meanwhile.
     let extras_now = !old.wants_lyric_extras() && app.cfg.wants_lyric_extras() && app.lyrics_translation.is_empty() && app.lyrics_romaji.is_empty();
     let words_now = !old.wants_word_timing() && app.cfg.wants_word_timing() && app.lyrics_words.is_empty();
-    if extras_now || words_now {
-        if let Some(info) = app.media.as_ref().filter(|_| !app.lyrics.is_empty()).map(|m| m.info.clone()) {
-            crate::lyrics::fetch(info, 0, crate::lyrics::Options::from_config(&app.cfg));
-        }
+    if (extras_now || words_now) && !app.lyrics.is_empty() {
+        crate::lyric_filter::request(app, app.lyric_request.manual, true);
     }
     check_fullscreen(app);
     schedule(app);
@@ -544,10 +576,15 @@ pub fn config_changed(app: &mut App, old: &Config) {
 
 /// Pages in the page bar: the ones switched on, plus the one on screen if it was opened anyway
 /// (a file drop shows the Shelf, "+ Add" on the Calendar opens To-do). Never empty.
+pub fn update_tab_visible(app: &App) -> bool {
+    app.notch.update_preview.is_some() || app.update.tab_visible()
+}
+
 pub fn visible_pages(app: &App) -> Vec<Page> {
     let shown = Notch::pages(&app.cfg);
     let current = app.notch.shown_page();
-    let pages: Vec<Page> = Page::ALL.iter().copied().filter(|p| shown.contains(p) || *p == current).collect();
+    let mut pages: Vec<Page> = Page::ALL.iter().copied().filter(|p| shown.contains(p) || *p == current).collect();
+    if update_tab_visible(app) { pages.push(Page::Updates); }
     if pages.is_empty() {
         vec![Page::Music]
     } else {
@@ -557,6 +594,7 @@ pub fn visible_pages(app: &App) -> Vec<Page> {
 
 /// The page on screen was switched off: move to the nearest page still showing.
 fn leave_hidden_page(app: &mut App) {
+    if app.notch.page == Page::Updates && update_tab_visible(app) { return; }
     let shown = Notch::pages(&app.cfg);
     if shown.is_empty() || shown.contains(&app.notch.page) {
         return;
@@ -564,6 +602,24 @@ fn leave_hidden_page(app: &mut App) {
     let at = Page::ALL.iter().position(|p| *p == app.notch.page).unwrap_or(0);
     let next = Page::ALL[at..].iter().chain(Page::ALL[..at].iter().rev()).find(|p| shown.contains(p));
     app.notch.page = next.copied().unwrap_or(shown[0]);
+}
+
+/// Apply updater events without stealing focus; retire the temporary tab when work is done.
+pub fn update_status(app: &mut App, status: crate::update::Status) {
+    if status.tab_visible() { app.notch.update_preview = None; }
+    app.update.receive(status);
+    if app.notch.page == Page::Updates && !update_tab_visible(app) {
+        let previous = app.notch.update_return_page.take();
+        let shown = Notch::pages(&app.cfg);
+        let destination = previous.filter(|p| *p != Page::Updates && shown.contains(p)).or_else(|| shown.first().copied()).unwrap_or(Page::Music);
+        set_page(app, destination);
+        let index = visible_pages(app).iter().position(|p| *p == destination).unwrap_or(0);
+        app.notch.page_pos.snap(index as f32);
+    }
+    // Tab hit regions and page size must refresh even while the notch is already open.
+    app.notch.hover = None;
+    app.notch.pressed = None;
+    request_frame(app);
 }
 
 /// With "Follow the mouse", moves the notch to the monitor the pointer has rested on. It waits for two
@@ -637,6 +693,7 @@ pub fn check_fullscreen(app: &mut App) {
             let _ = ShowWindow(app.notch.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
         }
         if !hide {
+            ensure_topmost(app);
             request_frame(app);
         }
     }
@@ -676,6 +733,10 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
                 T_DEMO => demo_step(app),
                 T_IDLE => on_idle_check(app),
                 T_CURSOR => follow_mouse(app),
+                T_ZORDER => {
+                    unsafe { let _ = KillTimer(Some(app.notch.hwnd), T_ZORDER); }
+                    ensure_topmost(app);
+                },
                 id => timer_hook(app, id),
             }
             Some(LRESULT(0))
@@ -725,6 +786,8 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
             if wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
                 on_power(app, lparam);
             } else if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC {
+                check_fullscreen(app);
+                ensure_topmost(app);
                 schedule(app);
             }
             Some(LRESULT(1))
@@ -764,6 +827,9 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         events::WM_APP_FOREGROUND => {
             follow_foreground(app);
             check_fullscreen(app);
+            ensure_topmost(app);
+            // Some apps restack their windows just after activation; catch that delayed change too.
+            unsafe { SetTimer(Some(app.notch.hwnd), T_ZORDER, 250, None); }
             Some(LRESULT(0))
         }
         events::WM_APP_SHOW_SETTINGS => {
@@ -821,6 +887,7 @@ fn on_idle_check(app: &mut App) {
     if app.cfg.hide_fullscreen {
         check_fullscreen(app);
     }
+    ensure_topmost(app);
     let idle = sys::idle_seconds();
     let was = app.notch.idle_mode;
     app.notch.idle_mode = idle >= IDLE_MASCOT_S || (was && app.notch.mascot.mood != crate::mascot::Mood::Awake);

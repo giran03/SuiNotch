@@ -4,7 +4,7 @@ use super::*;
 
 #[cfg(test)]
 #[path = "tasks_test.rs"]
-mod integration;
+pub(super) mod integration;
 
 pub fn cancel_time_edit(app: &mut App) {
     if app.notch.field.as_ref().is_some_and(|f| f.target == EditTarget::ReminderTime) {

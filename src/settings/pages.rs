@@ -19,7 +19,7 @@ impl Ui<'_, '_> {
             3 => {
                 // What the song on screen has, so the Second line setting can say whether it will show anything.
                 let extras = (!app.lyrics.is_empty()).then(|| (!app.lyrics_translation.is_empty(), !app.lyrics_romaji.is_empty()));
-                self.music(&cfg, app.recent.items.len(), extras)
+                self.music(&cfg, app.recent.items.len(), extras, app.media.as_ref().map(|m| &m.info))
             }
             4 => self.todo(&cfg),
             5 => self.calendar(&cfg, app),
@@ -165,18 +165,31 @@ impl Ui<'_, '_> {
     }
 
     /// `extras` is (has a translation, has romaji) for the song on screen, or None when it has no lyrics.
-    fn music(&mut self, c: &Config, recent: usize, extras: Option<(bool, bool)>) {
+    fn music(&mut self, c: &Config, recent: usize, extras: Option<(bool, bool)>, media: Option<&crate::events::MediaInfo>) {
         self.title("Music and lyrics");
         self.section("Lyrics");
-        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.toggle(c, r[0], "Open lyrics automatically", Some("Show the lyrics panel whenever the Music page opens"), |c| &mut c.lyrics_auto);
         self.toggle(c, r[1], "Show lyrics in the closed notch", Some("The current line, in the look chosen below"), |c| &mut c.lyrics_pill);
+        self.toggle(c, r[3], "Fetch the next song's lyrics ahead", Some("While a song plays, the one likely to follow is looked up, so its lyrics show at once. Needs Keep lyrics on this PC"), |c| &mut c.lyrics_prefetch);
+        self.toggle(c, r[4], "Learn what plays next", Some("Remembers which songs follow which, on this PC only, to know what to fetch ahead"), |c| &mut c.lyrics_learn);
         let tries = |v: u32| match v {
             0 => "No retries".to_string(),
             1 => "1 retry".to_string(),
             n => format!("{n} retries"),
         };
-        self.stepper(c, r[2], "Keep searching for", Some("When no lyrics are found, search again this many times. Each retry tries the English and native titles"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
+        self.stepper(c, r[2], "Keep searching for", Some("When a lyrics service does not answer, try again this many times, waiting longer each time"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
+        self.section("Lyric searches");
+        let r = self.card(&[ROW_SUB]);
+        if let Some(info) = media {
+            let name = format!("{} lyric searches", crate::media::source_name(&info.app_id));
+            let help = if crate::lyric_filter::is_browser(&info.app_id) { "Browsers need an explicit search; click for Manual or Never" } else { "Click to cycle Automatic, Manual, Never; remembered for this player" };
+            self.button(r[0], &name, Some(help), crate::lyric_filter::policy(c, info).label(), Act::LyricsSource, false);
+        } else {
+            self.button(r[0], "Per-player lyric searches", Some("Play something to change its player's preference"), "No player", Act::LyricsSource, false);
+        }
+        self.cv.wrapped("Automatic waits 2 seconds, skips podcasts, ads and videos, and checks unclear tracks with a music catalog. Browsers always need a manual search. Unknown players default to manual. Never blocks searches. Lyrics Off keeps loaded lyrics and stops searching.", R::new(self.x + 4.0, self.y, self.w - 8.0, 54.0), 11.5, 500, DIM, Align::Left);
+        self.y += 66.0;
         let preview = self.lyric_look_settings(c, extras);
         self.section("Now playing");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
@@ -184,13 +197,14 @@ impl Ui<'_, '_> {
         self.toggle(c, r[1], "Artwork glow", Some("Tint the notch with the colours of the album cover"), |c| &mut c.artwork_glow);
         self.toggle(c, r[2], "Show player name", Some("Spotify, Apple Music, Chrome and others"), |c| &mut c.show_source);
         self.section("Privacy");
-        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Lyrics come from LRCLIB", Some("Only the song title, artist, album and length are sent"), "lrclib.net", Act::Website, false);
-        self.toggle(c, r[1], "Fall back to other services", Some("Backup lyrics and extras. Sends title and artist to NetEase and Apple"), |c| &mut c.lyrics_fallback);
-        self.toggle(c, r[2], "Keep lyrics on this PC", Some("A song already looked up shows at once, even offline"), |c| &mut c.lyrics_cache);
+        self.toggle(c, r[1], "Fall back to other services", Some("Backup lyrics, extras, song checks and album track lists. Sends title and artist to NetEase and Apple"), |c| &mut c.lyrics_fallback);
+        self.toggle(c, r[2], "Keep lyrics on this PC", Some("A song already looked up shows at once, even offline. Songs with none are remembered for 3 days"), |c| &mut c.lyrics_cache);
         self.button(r[3], "Clear saved lyrics", Some("Removes the lyrics kept on this PC; they are fetched again when needed"), "Clear", Act::ClearLyricsCache, true);
-        let sub = format!("{recent} song{} in the Recently played list", if recent == 1 { "" } else { "s" });
-        self.button(r[4], "Clear recently played", Some(&sub), "Clear", Act::ClearRecent, true);
+        self.button(r[4], "Your own lyric files", Some("Put .lrc or .txt files named \"Artist - Title\" here; they come first and send nothing"), "Open folder", Act::OpenLyricsFolder, false);
+        let sub = format!("{recent} song{} in the Recently played list, and what was learned about what plays next", if recent == 1 { "" } else { "s" });
+        self.button(r[5], "Clear recently played", Some(&sub), "Clear", Act::ClearRecent, true);
         // Draw last so the pinned preview covers the scrolling controls.
         self.lyric_preview_section(c, preview);
     }
@@ -207,7 +221,7 @@ impl Ui<'_, '_> {
         let r = self.card(&[ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG, ROW_SEG]);
         self.dimmed(off, |ui| {
             ui.seg_row(c, r[0], "Lyric preset", Some("Start from a look, then change any choice below; it reads Custom once they match no preset"), &ls::PRESET_LABELS, |c| &mut c.lyrics_preset);
-            ui.seg_row(c, r[1], "Placement", Some("Under the notch, or in it in place of the song title"), &ls::PLACE_LABELS, |c| &mut c.lyrics_place);
+            ui.seg_row(c, r[1], "Placement", Some("Below the notch, inside it, or both at once"), &ls::PLACE_LABELS, |c| &mut c.lyrics_place);
         });
         self.dimmed(off || in_notch, |ui| {
             let sub = if in_notch { "Not used in the notch: the notch itself is the backdrop" } else { "What sits behind the line. Album tint follows the cover" };
@@ -455,7 +469,11 @@ impl Ui<'_, '_> {
             Status::Checking => ("Checking for updates…".to_string(), format!("Version {current}"), None),
             Status::UpToDate => ("You're up to date".to_string(), format!("Version {current} is the latest"), Some(("Check again", Act::CheckUpdate))),
             Status::Available(rel) => (format!("Version {} is available", rel.version), format!("You have {current}"), Some(("Install and restart", Act::InstallUpdate))),
-            Status::Downloading(v) => (format!("Installing {v}…"), "SuiNotch restarts by itself in a moment".to_string(), None),
+            Status::Downloading(v) => (format!("Downloading {v}…"), "Downloading and verifying the update".to_string(), None),
+            Status::Ready(download) => (format!("Version {} is ready", download.release.version), "Download verified; restart when you're ready".to_string(), Some(("Install and restart", Act::InstallUpdate))),
+            Status::Installing(v) => (format!("Installing {v}…"), "SuiNotch restarts by itself in a moment".to_string(), None),
+            Status::Installed(v) => (format!("Version {v} installed"), "Reopen SuiNotch if it hasn't restarted yet".to_string(), None),
+            Status::InstallFailed { message, .. } => ("Couldn't install the update".to_string(), message.clone(), Some(("Retry install", Act::InstallUpdate))),
             Status::Failed(msg) => ("Couldn't update".to_string(), msg.clone(), Some(("Try again", Act::CheckUpdate))),
         };
         match button {
@@ -463,6 +481,11 @@ impl Ui<'_, '_> {
             None => self.label(r[0], &label, Some(&sub)),
         }
         self.seg_row(cfg, r[2], "Automatic updates", Some("Automatic installs only while you're away from the PC"), &update::MODE_LABELS, |c| &mut c.update_mode);
+        self.section("Debug");
+        let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
+        self.button(r[0], "Preview Updates tab", Some("Step through test states; closes when you leave the tab"), "Open preview", Act::DebugUpdates, false);
+        self.button(r[1], "Test volume HUD", Some("Shows a sample at 50%; keeps your volume unchanged"), "Preview", Act::DebugHud, false);
+        self.button(r[2], "Test notification", Some("Shows a temporary message in the notch"), "Show", Act::DebugNotice, false);
         self.section("Your data");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Stored only on this PC", Some("Tasks, water log, shelf and settings. No accounts, no tracking"), "Open folder", Act::OpenData, false);

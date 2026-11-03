@@ -62,12 +62,18 @@ pub struct Config {
     pub clock_format: usize,
     pub glass: bool,
     // Music and lyrics
+    /// Per-player automatic, manual or never lyric lookup; absent sources use song detection.
+    pub lyrics_sources: std::collections::BTreeMap<String, crate::lyric_filter::Policy>,
     pub lyrics_auto: bool,
     pub lyrics_pill: bool,
     /// Ask NetEase Cloud Music for lyrics LRCLIB does not have.
     pub lyrics_fallback: bool,
     /// Keep looked-up lyrics on disk so a song is only searched for once.
     pub lyrics_cache: bool,
+    /// While a song plays, fetch the next one's lyrics into the cache (see `lyrics_prefetch`).
+    pub lyrics_prefetch: bool,
+    /// Learn from your own listening what tends to play next, on this PC only (see `track_history`).
+    pub lyrics_learn: bool,
     /// How many more times to search for a song's lyrics when the first search finds none; 0 searches
     /// once. Each retry searches under every name the song goes by. Settings from before this was a
     /// count (it was seconds) carry over under the old name.
@@ -181,11 +187,14 @@ impl Default for Config {
             artwork_glow: true,
             clock_format: 0,
             glass: false,
+            lyrics_sources: Default::default(),
             lyrics_auto: false,
             lyrics_pill: true,
             lyrics_fallback: true,
             lyrics_cache: true,
-            lyrics_retries: 3,
+            lyrics_prefetch: true,
+            lyrics_learn: true,
+            lyrics_retries: 5,
             lyrics_style: None,
             lyrics_preset: 0,
             lyrics_place: 0,
@@ -435,7 +444,7 @@ mod tests {
         assert_eq!(old.lyrics_retries, 7);
         let huge: Config = serde_json::from_str(r#"{"lyrics_retries": 500}"#).unwrap();
         assert_eq!(huge.sanitized().lyrics_retries, MAX_LYRICS_RETRIES);
-        assert_eq!(Config::default().lyrics_retries, 3);
+        assert_eq!(Config::default().lyrics_retries, 5);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! starts the new one.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -31,6 +32,7 @@ pub const MODE_AUTO: usize = 2;
 
 static MODE: AtomicUsize = AtomicUsize::new(MODE_AUTO);
 static BUSY: AtomicBool = AtomicBool::new(false);
+static PREPARED: Mutex<Option<Download>> = Mutex::new(None);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
@@ -38,6 +40,14 @@ pub struct Release {
     pub setup_url: String,
     pub setup_name: String,
     pub sums_url: String,
+}
+
+/// An installer whose checksum was verified, checked again immediately before launch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Download {
+    pub release: Release,
+    pub path: std::path::PathBuf,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -48,7 +58,42 @@ pub enum Status {
     UpToDate,
     Available(Release),
     Downloading(String),
+    Ready(Download),
+    Installing(String),
+    Installed(String),
+    InstallFailed {
+        release: Release,
+        message: String,
+    },
     Failed(String),
+}
+
+impl Status {
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Self::Available(release) | Self::InstallFailed { release, .. } => Some(&release.version),
+            Self::Ready(download) => Some(&download.release.version),
+            Self::Downloading(version) | Self::Installing(version) | Self::Installed(version) => Some(version),
+            _ => None,
+        }
+    }
+    pub fn tab_visible(&self) -> bool {
+        matches!(self, Self::Available(_) | Self::Downloading(_) | Self::Ready(_) | Self::Installing(_) | Self::InstallFailed { .. })
+    }
+
+    /// A routine recheck must not flicker the tab or discard an already verified download.
+    pub fn receive(&mut self, incoming: Status) {
+        if (self.tab_visible() || matches!(self, Self::Installed(_))) && matches!(&incoming, Self::Checking | Self::Failed(_)) {
+            return;
+        }
+        if matches!((&*self, &incoming), (Self::Ready(old), Self::Available(new)) if old.release.version == new.version) {
+            return;
+        }
+        if matches!((&*self, &incoming), (Self::Installed(old), Self::Available(new)) if !is_newer(&new.version, old)) {
+            return;
+        }
+        *self = incoming;
+    }
 }
 
 pub fn set_mode(mode: usize) {
@@ -64,11 +109,8 @@ pub fn start(mode: usize) {
             let mode = MODE.load(Ordering::Relaxed);
             if mode != MODE_OFF {
                 if let Some(release) = run_check() {
-                    if mode == MODE_AUTO {
-                        wait_until_idle();
-                        if MODE.load(Ordering::Relaxed) == MODE_AUTO {
-                            run_install(&release);
-                        }
+                    if mode == MODE_AUTO && wait_until_idle() {
+                        run_install(&release);
                     }
                 }
             }
@@ -89,16 +131,46 @@ pub fn install(release: Release) {
     std::thread::spawn(move || run_install(&release));
 }
 
-fn wait_until_idle() {
+/// Download and verify now, leaving the restart decision to the user.
+pub fn download(release: Release) {
+    std::thread::spawn(move || run_download(&release, false));
+}
+
+pub fn install_ready(download: Download) {
+    std::thread::spawn(move || {
+        let Some(_busy) = BusyGuard::acquire() else { return };
+        launch(&download);
+    });
+}
+
+fn wait_until_idle() -> bool {
     while crate::sys::idle_seconds() < IDLE_BEFORE_INSTALL_S {
+        if MODE.load(Ordering::Relaxed) != MODE_AUTO {
+            return false;
+        }
         std::thread::sleep(Duration::from_secs(60));
+    }
+    MODE.load(Ordering::Relaxed) == MODE_AUTO
+}
+
+struct BusyGuard;
+impl BusyGuard {
+    fn acquire() -> Option<Self> {
+        if BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            Some(Self)
+        } else {
+            None
+        }
+    }
+}
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::Release);
     }
 }
 
 fn run_check() -> Option<Release> {
-    if BUSY.swap(true, Ordering::AcqRel) {
-        return None;
-    }
+    let _busy = BusyGuard::acquire()?;
     post(Event::Update(Status::Checking));
     let (status, found) = match latest() {
         Ok(Some(r)) if is_newer(&r.version, env!("CARGO_PKG_VERSION")) => (Status::Available(r.clone()), Some(r)),
@@ -109,30 +181,65 @@ fn run_check() -> Option<Release> {
         }
     };
     post(Event::Update(status));
-    BUSY.store(false, Ordering::Release);
     found
 }
 
 fn run_install(release: &Release) {
-    if BUSY.swap(true, Ordering::AcqRel) {
-        return;
+    let prepared = PREPARED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(download) = prepared.filter(|d| d.release == *release && d.path.is_file()) {
+        let Some(_busy) = BusyGuard::acquire() else { return };
+        launch(&download);
+    } else {
+        run_download(release, true);
     }
+}
+
+fn run_download(release: &Release, install_after: bool) {
+    let Some(_busy) = BusyGuard::acquire() else { return };
     post(Event::Update(Status::Downloading(release.version.clone())));
     match download_verified(release) {
-        Ok(path) => {
-            crate::log(&format!("installing update {}", release.version));
-            // The installer closes this copy, replaces it and starts the new version.
-            if let Err(e) = std::process::Command::new(&path).args(["/S", "/UPDATE"]).spawn() {
-                crate::log(&format!("cannot start update installer: {e}"));
-                post(Event::Update(Status::Failed("Couldn't start the installer".into())));
+        Ok(download) => {
+            *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(download.clone());
+            if install_after {
+                launch(&download);
+            } else {
+                post(Event::Update(Status::Ready(download)));
             }
         }
         Err(msg) => {
             crate::log(&format!("update install failed: {msg}"));
-            post(Event::Update(Status::Failed(msg)));
+            post(Event::Update(Status::InstallFailed { release: release.clone(), message: msg }));
         }
     }
-    BUSY.store(false, Ordering::Release);
+}
+
+fn verify_download(download: &Download) -> std::result::Result<(), String> {
+    let data = std::fs::read(&download.path).map_err(|_| "The downloaded installer is missing. Download the update again.")?;
+    let buffer = CryptographicBuffer::CreateFromByteArray(&data).map_err(|e| e.message())?;
+    if sha256_hex(&buffer).map_err(|e| e.message())? != download.sha256 {
+        return Err("The installer changed after download. Download the update again.".into());
+    }
+    Ok(())
+}
+
+fn launch(download: &Download) {
+    let result = verify_download(download).and_then(|()| {
+        crate::log(&format!("installing update {}", download.release.version));
+        let mut child = std::process::Command::new(&download.path).args(["/S", "/UPDATE"]).spawn().map_err(|_| "Couldn't start the installer".to_string())?;
+        post(Event::Update(Status::Installing(download.release.version.clone())));
+        // Normally the installer closes this process and starts the updated version (whose tab is hidden).
+        let exit = child.wait().map_err(|_| "Couldn't read the installer result".to_string())?;
+        if !exit.success() {
+            return Err("Installation did not complete. Please try again.".into());
+        }
+        post(Event::Update(Status::Installed(download.release.version.clone())));
+        Ok(())
+    });
+    if let Err(message) = result {
+        crate::log(&format!("update install failed: {message}"));
+        *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        post(Event::Update(Status::InstallFailed { release: download.release.clone(), message }));
+    }
 }
 
 // ------------------------------------------------------------------ network
@@ -173,7 +280,7 @@ fn latest() -> std::result::Result<Option<Release>, String> {
     Ok(parse_release(&json))
 }
 
-fn download_verified(release: &Release) -> std::result::Result<std::path::PathBuf, String> {
+fn download_verified(release: &Release) -> std::result::Result<Download, String> {
     let client = client().map_err(|e| e.message())?;
     let sums = String::from_utf8(bytes(&get_buffer(&client, &release.sums_url)?)?).map_err(|_| "Unreadable checksum file".to_string())?;
     let expected = expected_sum(&sums, &release.setup_name).ok_or("The release has no checksum for its installer")?;
@@ -185,7 +292,7 @@ fn download_verified(release: &Release) -> std::result::Result<std::path::PathBu
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(&release.setup_name);
     std::fs::write(&path, bytes(&setup)?).map_err(|e| e.to_string())?;
-    Ok(path)
+    Ok(Download { release: release.clone(), path, sha256: expected })
 }
 
 fn sha256_hex(buf: &IBuffer) -> Result<String> {
@@ -199,6 +306,9 @@ fn sha256_hex(buf: &IBuffer) -> Result<String> {
 /// Reads a GitHub "latest release" response; None when it lacks the installer or its sums.
 pub fn parse_release(v: &Value) -> Option<Release> {
     let version = v.get("tag_name")?.as_str()?.trim_start_matches(['v', 'V']).to_string();
+    if !version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')) {
+        return None;
+    }
     parse_version(&version)?;
     let assets = v.get("assets")?.as_array()?;
     let asset = |pred: &dyn Fn(&str) -> bool| {
@@ -208,7 +318,8 @@ pub fn parse_release(v: &Value) -> Option<Release> {
             pred(name).then(|| (name.to_string(), url.to_string()))
         })
     };
-    let (setup_name, setup_url) = asset(&|n| n.to_ascii_lowercase().ends_with("-setup.exe"))?;
+    let expected_name = format!("SuiNotch-{version}-Setup.exe");
+    let (setup_name, setup_url) = asset(&|n| n.eq_ignore_ascii_case(&expected_name))?;
     let (_, sums_url) = asset(&|n| n.eq_ignore_ascii_case(SUMS_NAME))?;
     Some(Release { version, setup_url, setup_name, sums_url })
 }
@@ -242,6 +353,92 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn release() -> Release {
+        Release {
+            version: "99.0.0".into(),
+            setup_url: "https://example.invalid/setup".into(),
+            setup_name: "SuiNotch-99.0.0-Setup.exe".into(),
+            sums_url: "https://example.invalid/sums".into(),
+        }
+    }
+    fn prepared() -> Download {
+        Download { release: release(), path: std::path::PathBuf::from("missing-test-installer.exe"), sha256: "0".repeat(64) }
+    }
+
+    #[test]
+    fn update_tab_tracks_actionable_states_and_disappears_on_completion() {
+        for status in [Status::Idle, Status::Checking, Status::UpToDate, Status::Failed("offline".into()), Status::Installed("99.0.0".into())] {
+            assert!(!status.tab_visible());
+        }
+        for status in [
+            Status::Available(release()),
+            Status::Downloading("99.0.0".into()),
+            Status::Ready(prepared()),
+            Status::Installing("99.0.0".into()),
+            Status::InstallFailed { release: release(), message: "offline".into() },
+        ] {
+            assert!(status.tab_visible());
+        }
+        let mut status = Status::Idle;
+        status.receive(Status::Available(release()));
+        status.receive(Status::Downloading("99.0.0".into()));
+        status.receive(Status::Ready(prepared()));
+        status.receive(Status::Installing("99.0.0".into()));
+        assert!(status.tab_visible());
+        status.receive(Status::Installed("99.0.0".into()));
+        assert!(!status.tab_visible());
+    }
+
+    #[test]
+    fn checks_do_not_discard_downloads_or_resurrect_completed_update() {
+        let mut status = Status::Ready(prepared());
+        for incoming in [Status::Checking, Status::Failed("offline".into()), Status::Available(release())] {
+            status.receive(incoming);
+            assert!(matches!(status, Status::Ready(_)));
+        }
+        status.receive(Status::Installed("99.0.0".into()));
+        status.receive(Status::Checking);
+        status.receive(Status::Available(release()));
+        assert!(!status.tab_visible());
+        let mut next = release();
+        next.version = "99.0.1".into();
+        status.receive(Status::Available(next));
+        assert!(status.tab_visible());
+    }
+
+    #[test]
+    fn rejected_busy_guard_never_unlocks_an_active_operation() {
+        let first = BusyGuard::acquire().unwrap();
+        assert!(BusyGuard::acquire().is_none());
+        assert!(BUSY.load(Ordering::Acquire));
+        drop(first);
+        assert!(!BUSY.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn changed_or_missing_installer_is_never_launched() {
+        let mut download = prepared();
+        assert!(verify_download(&download).is_err());
+        let dir = std::env::temp_dir().join(format!("suinotch-verify-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        download.path = dir.join("fixture.bin");
+        std::fs::write(&download.path, b"abc").unwrap();
+        download.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into();
+        assert!(verify_download(&download).is_ok());
+        std::fs::write(&download.path, b"changed").unwrap();
+        assert!(verify_download(&download).is_err());
+        std::fs::remove_file(&download.path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn installer_asset_must_be_the_expected_file_name() {
+        for name in ["../SuiNotch-1.2.0-Setup.exe", "Other-Setup.exe", "SuiNotch-1.1.0-Setup.exe"] {
+            let value = json!({"tag_name":"v1.2.0", "assets":[{"name":name,"browser_download_url":"https://example.invalid/s"},{"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/h"}]});
+            assert!(parse_release(&value).is_none());
+        }
+    }
 
     #[test]
     fn compares_versions_numerically() {

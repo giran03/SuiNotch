@@ -105,10 +105,15 @@ enum Act {
     RemoveCalendar,
     ClearClips,
     ClearLyricsCache,
+    OpenLyricsFolder,
+    LyricsSource,
     ClearRecent,
     /// A search result: its position in the search index.
     Found(usize),
     SearchClear,
+    DebugUpdates,
+    DebugHud,
+    DebugNotice,
     DiagRefresh,
     DiagCopy,
     OpenLog,
@@ -482,6 +487,9 @@ fn act(app: &mut App, a: Act) {
             }
             return;
         }
+        Act::DebugUpdates => { crate::notch::debug::open_updates(app); return; }
+        Act::DebugHud => { crate::notch::debug::volume_hud(app); return; }
+        Act::DebugNotice => { crate::notch::debug::notification(app); return; }
         Act::DiagRefresh => {
             let snapshot = diag::snapshot(app);
             if let Some(s) = app.settings.as_mut() {
@@ -584,14 +592,32 @@ fn act(app: &mut App, a: Act) {
             crate::notch::notice(app, "Clipboard history cleared");
             return;
         }
+        Act::LyricsSource => {
+            if let Some(info) = app.media.as_ref().map(|m| &m.info) {
+                let current = crate::lyric_filter::policy(&c, info);
+                let next = if crate::lyric_filter::is_browser(&info.app_id) {
+                    if current == crate::lyric_filter::Policy::Never { crate::lyric_filter::Policy::Manual } else { crate::lyric_filter::Policy::Never }
+                } else { current.next() };
+                c.lyrics_sources.insert(info.app_id.clone(), next);
+            }
+        }
         Act::ClearLyricsCache => {
             let n = crate::lyrics_cache::clear();
             crate::notch::notice(app, &format!("Cleared {n} saved lyric{}", if n == 1 { "" } else { "s" }));
             return;
         }
+        Act::OpenLyricsFolder => {
+            let dir = crate::lyrics_local::dir();
+            let _ = std::fs::create_dir_all(&dir);
+            sys::open(&dir);
+            return;
+        }
         Act::ClearRecent => {
             app.recent.clear();
             config::save_json("recent.json", &app.recent);
+            app.history.clear();
+            app.save_history();
+            crate::lyrics_prefetch::cancel();
             crate::notch::notice(app, "Recently played cleared");
             if let Some(s) = &app.settings {
                 invalidate(s);
@@ -663,8 +689,10 @@ fn act(app: &mut App, a: Act) {
             return;
         }
         Act::InstallUpdate => {
-            if let Status::Available(release) = &app.update {
-                update::install(release.clone());
+            match app.update.clone() {
+                Status::Available(release) | Status::InstallFailed { release, .. } => update::install(release),
+                Status::Ready(download) => update::install_ready(download),
+                _ => {},
             }
             return;
         }

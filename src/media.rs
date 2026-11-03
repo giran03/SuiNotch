@@ -28,6 +28,11 @@ struct Track {
     title: String,
     artist: String,
     album: String,
+    album_artist: String,
+    track_number: u32,
+    track_count: u32,
+    genres: Vec<String>,
+    subtitle: String,
     app_id: String,
 }
 
@@ -217,6 +222,11 @@ fn track(session: &Session, reload: bool) -> Result<Track> {
         title: props.Title()?.to_string(),
         artist: props.Artist()?.to_string(),
         album: props.AlbumTitle().map(|s| s.to_string()).unwrap_or_default(),
+        album_artist: props.AlbumArtist().map(|s| s.to_string()).unwrap_or_default(),
+        track_number: props.TrackNumber().unwrap_or(0).max(0) as u32,
+        track_count: props.AlbumTrackCount().unwrap_or(0).max(0) as u32,
+        genres: props.Genres().map(|g| (0..g.Size().unwrap_or(0)).filter_map(|i| g.GetAt(i).ok()).map(|s| s.to_string()).collect()).unwrap_or_default(),
+        subtitle: props.Subtitle().map(|s| s.to_string()).unwrap_or_default(),
         app_id: session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default(),
     };
     *cached = Some(t.clone());
@@ -239,9 +249,19 @@ fn snapshot(session: &Session, reload: bool) -> Result<MediaInfo> {
     }
     let position_ms = ((position / 10_000).max(0) as u64).min(duration_ms.max(1));
     Ok(MediaInfo {
+        kind: match playback.PlaybackType().and_then(|v| v.Value()).ok() {
+            Some(windows::Media::MediaPlaybackType::Music) => crate::events::MediaKind::Music,
+            Some(windows::Media::MediaPlaybackType::Video) => crate::events::MediaKind::Video,
+            _ => crate::events::MediaKind::Unknown,
+        },
         title: t.title,
         artist: t.artist,
         album: t.album,
+        album_artist: t.album_artist,
+        track_number: t.track_number,
+        track_count: t.track_count,
+        genres: t.genres,
+        subtitle: t.subtitle,
         app_id: t.app_id,
         playing,
         position_ms,

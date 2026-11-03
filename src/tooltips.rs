@@ -3,24 +3,28 @@
 
 use crate::app::App;
 use crate::notch::Hit;
+use crate::lyric_style::LyricsMode;
 
 /// The state a hint's wording depends on.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Context {
-    pub lyrics_view: bool,
+    pub lyrics_mode: LyricsMode,
     pub recent_view: bool,
     /// What the lyrics panel shows under each line: 0 nothing, 1 romaji, 2 translation.
     pub panel_alt: usize,
     pub muted: bool,
+    /// The lyrics on show are kept for their song.
+    pub lyrics_kept: bool,
 }
 
 impl Context {
     pub fn of(app: &App) -> Context {
         Context {
-            lyrics_view: app.notch.lyrics_view,
+            lyrics_mode: app.cfg.lyrics_mode(),
             recent_view: app.notch.recent_view,
             panel_alt: app.cfg.lyrics_panel_alt,
             muted: app.audio.as_ref().is_some_and(|a| a.get().1),
+            lyrics_kept: app.lyric_request.pinned,
         }
     }
 }
@@ -34,8 +38,12 @@ pub fn describe(hit: Hit, ctx: &Context) -> Option<String> {
     let text = match hit {
         Hit::PageDot(page) => page.label(),
         Hit::Source => "Switch to the next player",
-        Hit::LyricsToggle if ctx.lyrics_view => "Hide lyrics",
-        Hit::LyricsToggle => "Show lyrics",
+        Hit::LyricsToggle => match ctx.lyrics_mode {
+            LyricsMode::Off => "Lyrics off; click to show outside",
+            LyricsMode::Outside => "Lyrics outside; click to show inside",
+            LyricsMode::Inside => "Lyrics inside; click to show both",
+            LyricsMode::Both => "Lyrics inside and outside; click to turn off",
+        },
         Hit::RecentToggle if ctx.recent_view => "Hide recently played",
         Hit::RecentToggle => "Recently played",
         Hit::LyricsEarlier => "Show lyrics earlier",
@@ -45,6 +53,9 @@ pub fn describe(hit: Hit, ctx: &Context) -> Option<String> {
             1 => "Romaji. Click for the next view",
             _ => "Translation. Click for the next view",
         },
+        Hit::LyricsWrong => "Wrong lyrics: never show these for this song, and look for others",
+        Hit::LyricsKeep if ctx.lyrics_kept => "Kept for this song. Click to stop keeping them",
+        Hit::LyricsKeep => "Keep these lyrics for this song, whatever later searches find",
         Hit::LyricLine(_) => "Jump to this line",
         Hit::Recent(_) => "Copy the song name",
         Hit::Volume if ctx.muted => "Unmute",
@@ -83,10 +94,14 @@ mod tests {
 
     #[test]
     fn wording_follows_the_state_of_a_toggle() {
-        let on = Context { lyrics_view: true, muted: true, ..Context::default() };
+        let on = Context { lyrics_mode: LyricsMode::Inside, muted: true, ..Context::default() };
         let off = Context::default();
-        assert_eq!(describe(Hit::LyricsToggle, &on).as_deref(), Some("Hide lyrics"));
-        assert_eq!(describe(Hit::LyricsToggle, &off).as_deref(), Some("Show lyrics"));
+        assert_eq!(describe(Hit::LyricsToggle, &on).as_deref(), Some("Lyrics inside; click to show both"));
+        let both = Context { lyrics_mode: LyricsMode::Both, ..Context::default() };
+        assert_eq!(describe(Hit::LyricsToggle, &both).as_deref(), Some("Lyrics inside and outside; click to turn off"));
+        assert_eq!(describe(Hit::LyricsToggle, &off).as_deref(), Some("Lyrics off; click to show outside"));
+        let outside = Context { lyrics_mode: LyricsMode::Outside, ..Context::default() };
+        assert_eq!(describe(Hit::LyricsToggle, &outside).as_deref(), Some("Lyrics outside; click to show inside"));
         assert_eq!(describe(Hit::Volume, &on).as_deref(), Some("Unmute"));
         assert_eq!(describe(Hit::Volume, &off).as_deref(), Some("Mute"));
     }

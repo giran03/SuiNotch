@@ -137,33 +137,43 @@ pub fn drain_events(app: &mut App) {
     }
 }
 
+/// A long pause between two songs breaks the chain: what plays after it says nothing about the first.
+const TRANSITION_GAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Notes that `next` followed the song on screen, so its lyrics can be fetched ahead next time.
+fn learn_transition(app: &mut App, next: &crate::events::MediaInfo) {
+    let Some(prev) = app.media.as_ref() else { return };
+    let paused_long = !prev.info.playing && prev.at.elapsed() > TRANSITION_GAP;
+    // Only songs in one automatic player: a browser tab or a podcast after a song must never become
+    // something fetched ahead under that player's name.
+    let automatic = |i: &crate::events::MediaInfo| crate::lyric_filter::policy(&app.cfg, i) == crate::lyric_filter::Policy::Automatic;
+    let song = crate::lyric_filter::assessment(next).verdict != crate::song_gate::Verdict::NotSong;
+    if !app.cfg.lyrics_learn || paused_long || prev.info.app_id != next.app_id || !automatic(&prev.info) || !automatic(next) || !song {
+        return;
+    }
+    let (info, played) = (prev.info.clone(), prev.position_ms());
+    if app.history.record(&info, played, next, store::now()) {
+        app.save_history();
+    }
+}
+
 /// Applies one background event; returns true when the notch looks different afterwards.
 pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
     match ev {
         Event::SoundImported { result, replacement } => { crate::settings::sounds::import_finished(app, result, replacement); false },
         Event::SoundMessage(message) => { crate::settings::sounds::message(app, &message); false },
         Event::Media(info) => {
-            let Some(info) = info else {
-                app.media = None;
-                return true;
-            };
-            // One lookup per track, even if the player briefly reports nothing between songs.
-            let key = info.track_key();
-            if key != app.lyrics_requested {
-                app.lyrics_requested = key;
-                app.lyrics_attempt = 0;
-                app.lyrics.clear();
-                app.lyrics_translation.clear();
-                app.lyrics_romaji.clear();
-                app.lyrics_words.clear();
-                app.lyrics_key = 0;
-                app.lyrics_source = None;
-                crate::lyrics::fetch(info.clone(), 0, crate::lyrics::Options::from_config(&app.cfg));
-                if app.recent.played(&info.title, &info.artist, store::now()) {
+            if let Some(info) = &info {
+                let changed = app.media.as_ref().is_none_or(|m| m.info.track_key() != info.track_key());
+                if changed && app.recent.played(&info.title, &info.artist, store::now()) {
                     crate::config::save_json("recent.json", &app.recent);
                 }
+                if changed {
+                    learn_transition(app, info);
+                }
             }
-            app.media = Some(app::Media { info, at: Instant::now() });
+            app.media = info.map(|info| app::Media { info, at: Instant::now() });
+            crate::lyric_filter::reconcile(app);
             true
         }
         Event::Artwork { key, art } => {
@@ -172,23 +182,8 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
             app.notch.art = None;
             true
         }
-        Event::Lyrics { key, found } => {
-            if app.media.as_ref().is_some_and(|m| m.info.track_key() == key) {
-                app.lyrics_source = found.as_ref().map(|f| (f.source, f.synced));
-                let found = found.unwrap_or_else(|| crate::lyrics::Found {
-                    lines: Vec::new(),
-                    source: crate::lyrics::Source::Lrclib,
-                    synced: false,
-                    translation: Vec::new(),
-                    romaji: Vec::new(),
-                    words: Vec::new(),
-                });
-                app.lyrics = found.lines;
-                app.lyrics_translation = found.translation;
-                app.lyrics_romaji = found.romaji;
-                app.lyrics_words = found.words;
-                app.lyrics_key = key;
-            }
+        Event::Lyrics { key, generation, outcome } => {
+            crate::lyric_filter::apply(app, key, generation, outcome);
             true
         }
         Event::Volume { level, muted } => {
@@ -206,6 +201,9 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
         Event::Network { connected, name } => {
             let state = (connected, name.clone());
             let previous = app.network.replace(state.clone());
+            if connected && previous.as_ref().is_some_and(|p| !p.0) {
+                crate::lyric_filter::reconnected(app);
+            }
             if previous.is_some_and(|p| p != state) && app.cfg.hud_wifi {
                 show_hud(app, Hud::Wifi { connected, name });
             }
@@ -220,7 +218,7 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
         Event::Update(status) => {
             use crate::update::{Status, MODE_AUTO, MODE_OFF};
             if let Status::Available(r) = &status {
-                let known = matches!(&app.update, Status::Available(old) if old.version == r.version);
+                let known = app.update.version() == Some(r.version.as_str());
                 if !known && app.cfg.update_mode != MODE_OFF {
                     let text = if app.cfg.update_mode == MODE_AUTO {
                         format!("SuiNotch {} installs when you're away", r.version)
@@ -230,9 +228,15 @@ pub(super) fn on_event(app: &mut App, ev: Event) -> bool {
                     notice(app, &text);
                 }
             }
-            app.update = status;
+            if let Status::Failed(message) = &status {
+                if app.update.tab_visible() { notice(app, message); }
+            }
+            if let Status::Installed(version) = &status {
+                notice(app, &format!("SuiNotch {version} installed"));
+            }
+            update_status(app, status);
             crate::settings::refresh(app);
-            false
+            true
         }
         Event::PlayerPicked(id) => {
             app.cfg.preferred_player = id;

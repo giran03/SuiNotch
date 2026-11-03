@@ -53,7 +53,8 @@ fn fixture() -> App {
         lyrics_romaji: Vec::new(),
         lyrics_words: Vec::new(),
         recent: Default::default(),
-        lyrics_requested: 0,
+        history: Default::default(),
+        lyric_request: Default::default(),
         lyrics_attempt: 0,
         shifts: Default::default(),
         pomo: crate::pomodoro::Pomodoro::new(&durations),
@@ -190,6 +191,69 @@ fn sound_library_native_flow() {
     assert!(!sound::ringing());
     crate::views::click(&mut app, crate::notch::Hit::AlertClose, (false, false));
     assert!(app.notch.alert.is_none());
+    unsafe {
+        DestroyWindow(app.settings.take().unwrap().hwnd).unwrap();
+        DestroyWindow(app.notch.hwnd).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "native graphics; requires isolated APPDATA ending in sound-test"]
+fn lyric_source_preferences_render_and_persist() {
+    let mut app = fixture();
+    std::fs::create_dir_all(config::data_dir()).unwrap();
+    let info = crate::events::MediaInfo { title: "Video title".into(), artist: "Creator".into(), app_id: "mpv.exe".into(), ..Default::default() };
+    app.media = Some(crate::app::Media { info, at: Instant::now() });
+    app.settings.as_mut().unwrap().page = 3;
+    app.settings.as_mut().unwrap().side_sel.snap(3.0);
+    snapshot(&mut app, "lyric-searches", 1.0);
+    let s = app.settings.as_mut().unwrap();
+    let row = s.hits.iter().find(|(_, a)| *a == Act::LyricsSource).unwrap().0;
+    s.scroll.snap((row.y - 180.0).max(0.0));
+    for (name, policy) in [("never", crate::lyric_filter::Policy::Never), ("automatic", crate::lyric_filter::Policy::Automatic), ("manual", crate::lyric_filter::Policy::Manual)] {
+        super::super::act(&mut app, Act::LyricsSource);
+        assert_eq!(app.cfg.lyrics_sources.get("mpv.exe"), Some(&policy));
+        let saved: Config = config::load_json("config.json");
+        assert_eq!(saved.lyrics_sources, app.cfg.lyrics_sources);
+        for scale in [1.0, 1.5, 2.0] { snapshot(&mut app, &format!("lyric-searches-{name}"), scale); }
+    }
+    app.media.as_mut().unwrap().info.app_id = "chrome.exe".into();
+    app.cfg.lyrics_sources.insert("chrome.exe".into(), crate::lyric_filter::Policy::Automatic);
+    for expected in [crate::lyric_filter::Policy::Never, crate::lyric_filter::Policy::Manual] {
+        super::super::act(&mut app, Act::LyricsSource);
+        assert_eq!(crate::lyric_filter::policy(&app.cfg, &app.media.as_ref().unwrap().info), expected);
+        assert_eq!(app.cfg.lyrics_sources.get("chrome.exe"), Some(&expected));
+    }
+    for scale in [1.0, 1.5, 2.0] { snapshot(&mut app, "browser-manual-gate", scale); }
+    unsafe {
+        DestroyWindow(app.settings.take().unwrap().hwnd).unwrap();
+        DestroyWindow(app.notch.hwnd).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "native graphics; requires isolated APPDATA ending in sound-test"]
+fn about_debug_previews_render_and_dispatch() {
+    let mut app = fixture();
+    std::fs::create_dir_all(config::data_dir()).unwrap();
+    app.settings.as_mut().unwrap().page = ABOUT_PAGE;
+    app.settings.as_mut().unwrap().side_sel.snap(ABOUT_PAGE as f32);
+    snapshot(&mut app, "about-debug-initial", 1.0);
+    let s = app.settings.as_mut().unwrap();
+    let row = s.hits.iter().find(|(_, a)| *a == Act::DebugUpdates).unwrap().0;
+    s.scroll.snap((row.y - 145.0).max(0.0));
+    for scale in [1.0, 1.5, 2.0] { snapshot(&mut app, "about-debug", scale); }
+    let original = app.cfg.clone();
+    super::super::act(&mut app, Act::DebugUpdates);
+    assert!(app.notch.update_preview.is_some());
+    assert_eq!(app.notch.page, crate::notch::Page::Updates);
+    assert!(matches!(app.update, Status::Idle));
+    super::super::act(&mut app, Act::DebugHud);
+    assert!(app.notch.update_preview.is_none());
+    assert!(matches!(app.notch.hud, Some((crate::notch::Hud::Volume { level: 0.5, muted: false }, _))));
+    super::super::act(&mut app, Act::DebugNotice);
+    assert!(app.notch.notice.as_ref().unwrap().0.contains("Test notification"));
+    assert_eq!(app.cfg, original);
     unsafe {
         DestroyWindow(app.settings.take().unwrap().hwnd).unwrap();
         DestroyWindow(app.notch.hwnd).unwrap();

@@ -64,6 +64,28 @@ pub fn lyrics_glyph(cv: &Canvas, cx: f32, cy: f32, size: f32, color: C) {
     cv.line(left, body.cy() + size * 0.14, left + (right - left) * 0.62, body.cy() + size * 0.14, color, stroke);
 }
 
+/// Show whether lyric lines sit below or inside the little notch; a slash means off.
+pub fn lyrics_mode_glyph(cv: &Canvas, cx: f32, cy: f32, size: f32, color: C, mode: crate::lyric_style::LyricsMode) {
+    use crate::lyric_style::LyricsMode;
+    let stroke = (size * 0.11).max(1.1);
+    if mode == LyricsMode::Off {
+        lyrics_glyph(cv, cx, cy, size, color);
+        cv.line(cx - size * 0.6, cy + size * 0.6, cx + size * 0.6, cy - size * 0.6, color, stroke);
+        return;
+    }
+    let outside = matches!(mode, LyricsMode::Outside | LyricsMode::Both);
+    let body = R::centered(cx, cy - if outside { size * 0.2 } else { 0.0 }, size * 1.2, size * 0.8);
+    cv.stroke_rrect(body, size * 0.22, color, stroke);
+    let y = if outside { body.bottom() + size * 0.3 } else { body.cy() - size * 0.15 };
+    let half = size * if outside { 0.45 } else { 0.32 };
+    cv.line(cx - half, y, cx + half, y, color, stroke);
+    cv.line(cx - half, y + size * 0.28, cx + half * 0.4, y + size * 0.28, color, stroke);
+    if mode == LyricsMode::Both {
+        cv.line(cx - size * 0.32, body.cy() - size * 0.15, cx + size * 0.32, body.cy() - size * 0.15, color, stroke);
+        cv.line(cx - size * 0.32, body.cy() + size * 0.13, cx + size * 0.13, body.cy() + size * 0.13, color, stroke);
+    }
+}
+
 pub fn pill_button(cv: &Canvas, app: &mut App, r: R, label: &str, h: Hit, primary: bool) {
     hit(app, r, h);
     let base = if primary { accent(app) } else { C::WHITE.a(0.12) };
@@ -265,7 +287,7 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
 /// lyric style, the current lyric line fades in over the title while there is one.
 fn closed_track(cv: &mut Canvas, app: &App, r: R) {
     let look = app.cfg.lyric_look();
-    let lyric = (!look.below_notch())
+    let lyric = look.in_notch()
         .then(|| app.notch.pill_line.and_then(|i| app.lyrics.get(i).map(|l| (i, l.text.clone()))))
         .flatten();
     let shown = if lyric.is_some() { app.notch.pill_alpha.value.clamp(0.0, 1.0) } else { 0.0 };
@@ -482,6 +504,7 @@ fn draw_expanded(cv: &mut Canvas, app: &mut App, body: R) {
             Page::Todo => pages::todo(cv, app, area),
             Page::Calendar => pages::calendar(cv, app, area),
             Page::Stats => pages::stats(cv, app, area),
+            Page::Updates => pages::updates(cv, app, area),
         }
         cv.pop();
         if d.abs() > 0.45 {
@@ -518,6 +541,9 @@ fn draw_page_bar(cv: &mut Canvas, app: &mut App, body: R, pages: &[Page], curren
             cv.fill_rrect(R::centered(x, cy, 14.0, 5.0), 2.5, accent);
         } else {
             cv.fill_circle(x, cy, 2.5, C::WHITE.a(0.35));
+            if *p == Page::Updates {
+                cv.stroke_circle(x, cy, 5.0, accent, 1.5);
+            }
         }
     }
     cv.text(current.label(), R::new(body.x + 26.0, cy - 9.0, 120.0, 18.0), 12.0, 650, DIM, Align::Left);
@@ -587,6 +613,15 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
     match h {
         Hit::Body | Hit::TodoRow(_) => {}
         Hit::PageDot(p) => notch::set_page(app, p),
+        Hit::DebugUpdateNext => notch::debug::next_update(app),
+        Hit::DebugUpdateClose => notch::debug::close_updates(app),
+        Hit::UpdateAction if app.notch.update_preview.is_some() => {},
+        Hit::UpdateAction => match app.update.clone() {
+            crate::update::Status::Available(release) | crate::update::Status::InstallFailed { release, .. } => crate::update::download(release),
+            crate::update::Status::Ready(download) => crate::update::install_ready(download),
+            _ => {},
+        },
+        Hit::UpdateNotes => crate::sys::open_url(&format!("https://github.com/{}/releases", crate::update::REPO)),
         Hit::Settings => {
             notch::collapse(app);
             crate::app::defer(Deferred::OpenSettings(None));
@@ -605,8 +640,12 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::Source => media::command(Command::NextSource),
         Hit::Seek | Hit::VolumeBar => {}
         Hit::LyricsToggle => {
-            app.notch.lyrics_view = !app.notch.lyrics_view;
+            let mut cfg = app.cfg.clone();
+            let mode = cfg.cycle_lyrics_mode();
+            app.notch.lyrics_view = matches!(mode, crate::lyric_style::LyricsMode::Inside | crate::lyric_style::LyricsMode::Both);
             app.notch.recent_view &= !app.notch.lyrics_view;
+            app.set_config(cfg);
+            crate::settings::refresh(app);
         }
         Hit::LyricsAlt => {
             // Steps through off, romaji and translation, skipping what this song doesn't have.
@@ -642,13 +681,20 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
             }
         }
         Hit::LyricsRetry => {
-            if let Some(info) = app.media.as_ref().map(|m| m.info.clone()) {
-                app.lyrics_attempt += 1;
-                app.lyrics.clear();
-                app.lyrics_key = 0;
-                app.lyrics_source = None;
-                crate::lyrics::fetch(info, app.lyrics_attempt, crate::lyrics::Options::from_config(&app.cfg));
+            crate::lyric_filter::request(app, true, false);
+        }
+        Hit::LyricsWrong => {
+            if crate::lyric_filter::reject(app) {
+                notch::notice(app, "Looking for other lyrics");
             }
+        }
+        Hit::LyricsKeep => {
+            let text = match crate::lyric_filter::toggle_keep(app) {
+                Some(true) => "Keeping these lyrics for this song",
+                Some(false) => "No longer keeping these lyrics",
+                None => "These lyrics can't be kept",
+            };
+            notch::notice(app, text);
         }
         Hit::FocusMode(_)
         | Hit::TimerPreset(_)

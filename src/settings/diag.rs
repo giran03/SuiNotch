@@ -101,8 +101,18 @@ pub(super) fn snapshot(app: &App) -> Diag {
             },
         ),
         row("Saved lyrics", lyrics_cache::count().to_string()),
+        row("Song check", song_check(app)),
         row("Recently played", app.recent.items.len().to_string()),
+        row("Songs learned for lookups ahead", app.history.len().to_string()),
     ];
+    let lookups: Vec<(String, String)> = crate::lyrics_log::recent()
+        .into_iter()
+        .map(|l| {
+            let when = crate::store::local(l.at).format("%H:%M:%S");
+            let waited = if l.waited_ms > 0 { format!(", waited {} ms", l.waited_ms) } else { String::new() };
+            row(&format!("{when} {}", l.kind), format!("{}: {} ({} requests, {} ms{waited})", l.title, l.result, l.requests, l.ms))
+        })
+        .collect();
 
     let calendar = vec![row(
         "Calendar",
@@ -116,9 +126,23 @@ pub(super) fn snapshot(app: &App) -> Diag {
     )];
 
     Diag {
-        groups: vec![("SuiNotch", app_group), ("Display and full screen", display), ("Music", music), ("Calendar", calendar)],
+        groups: vec![("SuiNotch", app_group), ("Display and full screen", display), ("Music", music), ("Lyric lookups", lookups), ("Calendar", calendar)],
         log: read_tail(&log_path(), LOG_TAIL_BYTES, LOG_LINES),
     }
+}
+
+/// What the song check makes of the track playing: the lookup decision, its score and the signs.
+fn song_check(app: &App) -> String {
+    let Some(m) = &app.media else { return "-".to_string() };
+    let gate = match crate::lyric_filter::gate(&app.cfg, &m.info) {
+        crate::lyric_filter::Gate::Fetch => "Automatic".to_string(),
+        crate::lyric_filter::Gate::Verify => "Checked with a music catalog first".to_string(),
+        crate::lyric_filter::Gate::Skip(Some(why)) => format!("Skipped: {why}"),
+        crate::lyric_filter::Gate::Skip(None) => "Manual for this player".to_string(),
+    };
+    let a = crate::lyric_filter::assessment(&m.info);
+    let score = if a.score == i32::MIN { "decided".to_string() } else { format!("score {}", a.score) };
+    format!("{gate} ({score}: {})", if a.signs.is_empty() { "no signs".to_string() } else { a.signs.join(", ") })
 }
 
 /// The last `lines` non-empty lines of a file, reading only its final `bytes`.

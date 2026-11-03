@@ -1,31 +1,29 @@
-//! Synced lyrics lookup on LRCLIB (lrclib.net), with NetEase (see `netease`) as an optional fallback
-//! and a cache on disk (see `lyrics_cache`). Only title, artist, album and length are sent.
+//! Synced lyrics for a song: your own files first (see `lyrics_local`), then the cache on disk (see
+//! `lyrics_cache`), then LRCLIB (see `lrclib`) with NetEase (see `netease`) as an optional fallback.
+//! Only title, artist, album and length are sent.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use windows::core::{Result, HSTRING};
-use windows::Foundation::Uri;
-use windows::Web::Http::HttpClient;
 
 use crate::events::{post, Event, MediaInfo};
-use crate::lrc::{self, Line};
+use crate::localized::{self, Verified};
+use crate::lrc::Line;
+use crate::lrclib::{self, Record};
+use crate::lyrics_cache::{self, Cached, Kind};
+use crate::lyrics_net::{self, Lane};
 use crate::words::{self, Word};
-use crate::{localized, lyrics_cache, netease};
-
-const API: &str = "https://lrclib.net/api";
-const USER_AGENT: &str = "SuiNotch/1.0 (a living notch for Windows)";
-const DURATION_TOLERANCE_S: f64 = 4.0;
+use crate::{lyrics_local, netease};
 
 /// Where a song's lyrics came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     Lrclib,
     Netease,
+    /// A lyric file of your own (see `lyrics_local`).
+    Local,
 }
 
 impl Source {
@@ -33,6 +31,7 @@ impl Source {
         match self {
             Source::Lrclib => "LRCLIB",
             Source::Netease => "NetEase",
+            Source::Local => "Your file",
         }
     }
 }
@@ -50,16 +49,19 @@ pub struct Found {
     /// The timing of each word of each line, one list per line; a line without any has an empty list,
     /// and a song without any has none at all.
     pub words: Vec<Vec<Word>>,
+    /// The service's id for these lyrics ("lrclib:390", "netease:123", "local:file.lrc"), so they can
+    /// be marked wrong or kept; empty when unknown.
+    pub id: String,
 }
 
 impl Found {
     fn from_netease(n: netease::Lyrics, duration_ms: u64) -> Found {
         let words = kept(&n.lines, words::attach(&n.lines, &n.timed), duration_ms);
-        Found { lines: n.lines, source: Source::Netease, synced: true, translation: n.translation, romaji: n.romaji, words }
+        Found { lines: n.lines, source: Source::Netease, synced: true, translation: n.translation, romaji: n.romaji, words, id: n.id }
     }
 
-    fn from_lrclib(lines: Vec<Line>, synced: bool) -> Found {
-        Found { lines, source: Source::Lrclib, synced, translation: Vec::new(), romaji: Vec::new(), words: Vec::new() }
+    pub(crate) fn from_lrclib(lines: Vec<Line>, synced: bool, id: String) -> Found {
+        Found { lines, source: Source::Lrclib, synced, translation: Vec::new(), romaji: Vec::new(), words: Vec::new(), id }
     }
 
     pub fn has_words(&self) -> bool {
@@ -67,8 +69,19 @@ impl Found {
     }
 }
 
+/// How a lookup ended.
+#[derive(Clone, Debug)]
+pub enum Outcome {
+    Found(Found),
+    /// The song has no words.
+    Instrumental,
+    NotFound,
+    /// A music catalog does not know it, so it is likely not a song; the reason is shown.
+    NotSong(&'static str),
+}
+
 /// Word lists as they are kept: vetted (see `words::vet`), and none at all when no line has any left.
-fn kept(lines: &[Line], words: Vec<Vec<Word>>, duration_ms: u64) -> Vec<Vec<Word>> {
+pub(crate) fn kept(lines: &[Line], words: Vec<Vec<Word>>, duration_ms: u64) -> Vec<Vec<Word>> {
     match words::vet(lines, words, duration_ms) {
         Ok(words) if words.iter().any(|w| !w.is_empty()) => words,
         Ok(_) => Vec::new(),
@@ -79,7 +92,6 @@ fn kept(lines: &[Line], words: Vec<Vec<Word>>, duration_ms: u64) -> Vec<Vec<Word
     }
 }
 
-
 /// One name a song goes by: its title and main artist.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Names {
@@ -87,15 +99,20 @@ pub struct Names {
     pub artist: String,
 }
 
-/// How far each song's lyrics were nudged, in ms (positive shows lines later). Kept in lyrics.json.
+/// How far each song's lyrics were nudged, in ms (positive shows lines later), and which lyrics were
+/// marked wrong for it. Kept in lyrics.json.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 #[serde(default)]
 pub struct Shifts {
     pub ms: HashMap<String, i64>,
+    /// Per song, the ids of lyrics marked wrong for it, never offered for it again.
+    pub blocked: HashMap<String, Vec<String>>,
 }
 
 pub const SHIFT_STEP_MS: i64 = 500;
 const MAX_SHIFT_MS: i64 = 30_000;
+/// The oldest wrong lyrics are forgotten past this many for one song.
+const MAX_BLOCKED: usize = 20;
 
 impl Shifts {
     pub fn get(&self, key: u64) -> i64 {
@@ -110,6 +127,24 @@ impl Shifts {
             self.ms.insert(key.to_string(), v);
         }
     }
+
+    pub fn blocked(&self, key: u64) -> Vec<String> {
+        self.blocked.get(&key.to_string()).cloned().unwrap_or_default()
+    }
+
+    /// Marks lyrics as wrong for a song; false when there is nothing to mark.
+    pub fn block(&mut self, key: u64, id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        let list = self.blocked.entry(key.to_string()).or_default();
+        if !list.iter().any(|b| b == id) {
+            list.push(id.to_string());
+        }
+        let extra = list.len().saturating_sub(MAX_BLOCKED);
+        list.drain(..extra);
+        true
+    }
 }
 
 /// What a lookup may use besides LRCLIB.
@@ -117,11 +152,11 @@ impl Shifts {
 pub struct Options {
     pub fallback: bool,
     pub cache: bool,
-    /// How many more times a first search is repeated when it finds nothing.
+    /// How many more times a first search is repeated when services fail to answer.
     pub retries: u32,
     /// Romaji or a translation is wanted, so LRCLIB lyrics (which have none) get them from NetEase.
     pub extras: bool,
-    /// The highlight follows words, so lyrics from LRCLIB (which has no word timing) look for it on NetEase.
+    /// The highlight follows words, so lyrics without word timing look for it on NetEase.
     pub words: bool,
 }
 
@@ -137,68 +172,149 @@ impl Options {
     }
 }
 
+/// One lookup.
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub info: MediaInfo,
+    /// 0 for the best match; each "Search again" moves on to another candidate.
+    pub attempt: usize,
+    pub opts: Options,
+    /// Started by SuiNotch rather than by a click: it waits a moment before using the network, and
+    /// believes a remembered "nothing found".
+    pub automatic: bool,
+    /// The player is not known for songs and its metadata leaves doubt: ask a music catalog first.
+    pub verify: bool,
+    /// Lyrics marked wrong for this song.
+    pub skip: Vec<String>,
+    /// Keep what is found under the song's alias key (see `lyrics_cache::alias_key`): for songs named
+    /// by a store rather than the player, fetched ahead.
+    pub alias: bool,
+}
+
+/// Automatic lookups wait this long before using the network, so a quick skip costs nothing.
+const AUTOMATIC_DELAY: Duration = Duration::from_secs(2);
+/// Pause before the second round of a search whose services failed, doubling each round up to the most.
+const RETRY_PAUSE: Duration = Duration::from_secs(1);
+const RETRY_PAUSE_MAX: Duration = Duration::from_secs(8);
+
 /// Songs already asked NetEase for romaji, translations and word timing this run, and whether word
 /// timing was asked for, so a song that has none is not asked again.
 static EXTRAS_ASKED: Mutex<Vec<(u64, bool)>> = Mutex::new(Vec::new());
 
-/// Pause between one search round and the next.
-const RETRY_PAUSE: Duration = Duration::from_secs(1);
-/// Counts requests, so a search that a newer one (another song, or "Search again") has replaced
-/// stops trying and says nothing.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Invalidates pending searches for the song playing and prevents their further requests.
+pub fn cancel() {
+    lyrics_net::cancel_foreground();
+}
 
-/// Looks up lyrics; `attempt` 0 is the best match, each retry moves on to another candidate.
-/// A first search that finds nothing is repeated up to `opts.retries` more times, since a service
-/// may time out, or the player may still be filling in the song's details. One round searches
-/// under every name the song goes by, so the original and the native-script title count as one.
-pub fn fetch(info: MediaInfo, attempt: usize, opts: Options) {
-    let key = info.track_key();
-    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+/// Looks up the song playing in the background and posts the outcome. Automatic requests wait two
+/// seconds before using the network; a song already known shows at once.
+pub fn fetch(req: Request) -> u64 {
+    let key = req.info.track_key();
+    let generation = lyrics_net::next_foreground();
     std::thread::spawn(move || {
-        let cached = if attempt == 0 && opts.cache { lyrics_cache::load(key, info.duration_ms) } else { None };
-        let found = cached.or_else(|| {
-            let found = search_until(&info, attempt, opts, generation);
-            // Unsynced lyrics are not kept: a synced version may turn up later, from either service.
-            if let (true, Some(f)) = (opts.cache, found.as_ref().filter(|f| f.synced)) {
-                if GENERATION.load(Ordering::SeqCst) == generation {
-                    lyrics_cache::store(key, info.duration_ms, f);
-                }
-            }
-            found
-        });
-        let found = found.map(|f| with_extras(key, &info, f, opts, generation));
-        if GENERATION.load(Ordering::SeqCst) == generation {
-            post(Event::Lyrics { key, found });
+        let _lane = lyrics_net::enter(Lane::Foreground(generation));
+        let started = Instant::now();
+        let Some(outcome) = resolve(&req, AUTOMATIC_DELAY) else { return };
+        crate::lyrics_log::note(&req.info, "Now playing", &outcome, started);
+        if lyrics_net::live() {
+            post(Event::Lyrics { key, generation, outcome });
         }
     });
+    generation
+}
+
+/// Works out a song's lyrics on this thread's lane, keeping what it learns in the cache. None when
+/// the lookup was replaced on the way.
+pub fn resolve(req: &Request, delay: Duration) -> Option<Outcome> {
+    let key = req.info.track_key();
+    let alias = lyrics_cache::alias_key(&req.info.title, &req.info.artist);
+    let store_key = if req.alias { alias } else { key };
+    let (opts, first) = (req.opts, req.attempt == 0);
+    if first {
+        if let Some(f) = lyrics_local::find(&req.info) {
+            return Some(Outcome::Found(f));
+        }
+        if opts.cache {
+            let load = |k: u64| lyrics_cache::load(k, req.info.duration_ms, opts.fallback);
+            // Lyrics marked wrong are not shown again, even from the cache.
+            let cached = load(store_key).or_else(|| load(alias)).filter(|c| !matches!(c, Cached::Lyrics(f) if req.skip.contains(&f.id)));
+            match cached {
+                Some(Cached::Lyrics(f)) => return Some(Outcome::Found(with_extras(store_key, &req.info, f, opts))),
+                Some(Cached::Instrumental) => return Some(Outcome::Instrumental),
+                Some(Cached::Miss) if req.automatic => return Some(Outcome::NotFound),
+                _ => {}
+            }
+        }
+    }
+    if req.automatic && !delay.is_zero() && !lyrics_net::sleep(delay) {
+        return None;
+    }
+    let mut native = None;
+    if req.verify && opts.fallback {
+        let verified = localized::verify(&req.info);
+        if !lyrics_net::live() {
+            return None;
+        }
+        match verified {
+            Verified::Song(names) => {
+                crate::song_gate::remember(key, true);
+                native = names;
+            }
+            Verified::NotSong => {
+                crate::song_gate::remember(key, false);
+                return Some(Outcome::NotSong(crate::song_gate::NOT_IN_CATALOG));
+            }
+            // The catalog could not be asked: search as for any song rather than give up.
+            Verified::Unknown => {}
+        }
+    }
+    let outcome = search_until(req, native)?;
+    if opts.cache && lyrics_net::live() {
+        match &outcome {
+            // Unsynced lyrics are not kept: a synced version may turn up later, from either service.
+            Outcome::Found(f) if f.synced => lyrics_cache::store(store_key, req.info.duration_ms, f),
+            Outcome::Instrumental => lyrics_cache::store_empty(store_key, req.info.duration_ms, Kind::Instrumental, opts.fallback),
+            // Only when every service answered: a failed request says nothing about the song.
+            Outcome::NotFound if first && !lyrics_net::any_failed() => lyrics_cache::store_empty(store_key, req.info.duration_ms, Kind::Miss, opts.fallback),
+            _ => {}
+        }
+    }
+    if !lyrics_net::live() {
+        return None;
+    }
+    Some(match outcome {
+        Outcome::Found(f) => Outcome::Found(with_extras(store_key, &req.info, f, opts)),
+        other => other,
+    })
 }
 
 /// Whether synced lyrics lack the romaji and translation, or the word timing, that are wanted.
+/// Your own files never send anything, so they never ask.
 fn needs_extras(f: &Found, opts: Options) -> bool {
     let lacks_extras = opts.extras && f.translation.is_empty() && f.romaji.is_empty();
     let lacks_words = opts.words && !f.has_words();
-    opts.fallback && f.synced && (lacks_extras || lacks_words)
+    opts.fallback && f.synced && f.source != Source::Local && (lacks_extras || lacks_words)
 }
 
-/// LRCLIB has no romaji, translations or word timing, so for lyrics from there they are taken from the
-/// same song on NetEase. Only those are used: the lines stay as they are, and the extras and words are
-/// matched to them by time (and, for words, by text).
-fn with_extras(key: u64, info: &MediaInfo, mut found: Found, opts: Options, generation: u64) -> Found {
+/// LRCLIB has no romaji or translations, and word timing only for some songs, so for lyrics from there
+/// those are taken from the same song on NetEase. Only those are used: the lines stay as they are, and
+/// the extras and words are matched to them by time (and, for words, by text).
+fn with_extras(key: u64, info: &MediaInfo, mut found: Found, opts: Options) -> Found {
     if !needs_extras(&found, opts) {
         return found;
     }
-    {
-        let mut asked = EXTRAS_ASKED.lock().unwrap_or_else(|e| e.into_inner());
-        if asked.contains(&(key, opts.words)) {
-            return found;
-        }
-        asked.push((key, opts.words));
+    if EXTRAS_ASKED.lock().unwrap_or_else(|e| e.into_inner()).contains(&(key, opts.words)) {
+        return found;
     }
-    let Ok(client) = client() else { return found };
-    let names = names_for(&client, info, true);
-    let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1, opts.words && !found.has_words()).into_iter().next() else { return found };
+    let names = names_for(info, true);
+    let looked_up = netease::lookup(&names, info.duration_ms, 1, opts.words && !found.has_words(), &[]).into_iter().next();
+    // Counted as asked only when the services answered: a failure or a skip may be asked again.
+    if lyrics_net::live() && !lyrics_net::any_failed() {
+        EXTRAS_ASKED.lock().unwrap_or_else(|e| e.into_inner()).push((key, opts.words));
+    }
+    let Some(n) = looked_up else { return found };
     merge_extras(&mut found, n, opts, info.duration_ms);
-    if opts.cache && GENERATION.load(Ordering::SeqCst) == generation {
+    if opts.cache && lyrics_net::live() {
         lyrics_cache::store(key, info.duration_ms, &found);
     }
     found
@@ -215,178 +331,107 @@ fn merge_extras(found: &mut Found, n: netease::Lyrics, opts: Options, duration_m
     }
 }
 
-fn search_until(info: &MediaInfo, attempt: usize, opts: Options, generation: u64) -> Option<Found> {
-    // "Search again" (attempt > 0) looks once; a song's first search gets its retries.
-    let rounds = if attempt == 0 { 1 + opts.retries } else { 1 };
-    for round in 0..rounds {
-        if round > 0 {
-            std::thread::sleep(RETRY_PAUSE);
-        }
-        if GENERATION.load(Ordering::SeqCst) != generation {
-            return None;
-        }
-        let looked_up = if attempt == 0 { lookup(info, opts.fallback, opts.words) } else { lookup_other(info, attempt, opts.fallback, opts.words) };
-        let found = looked_up.unwrap_or_else(|e| {
-            crate::log(&format!("lyrics lookup failed: {e}"));
-            None
-        });
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
+/// The pause before search round `round` (1 = the first retry): doubling, with a little jitter so
+/// many copies of the app do not ask in step.
+fn retry_pause(round: u32, jitter_ms: u64) -> Duration {
+    let doubled = RETRY_PAUSE.saturating_mul(1 << round.saturating_sub(1).min(5));
+    doubled.min(RETRY_PAUSE_MAX) + Duration::from_millis(jitter_ms % 250)
 }
 
-fn client() -> Result<HttpClient> {
-    let client = HttpClient::new()?;
-    let _ = client.DefaultRequestHeaders()?.UserAgent()?.TryParseAdd(&HSTRING::from(USER_AGENT));
-    Ok(client)
+fn jitter() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_millis() as u64)
+}
+
+/// Searches until something is found or every service has answered that it has nothing. Rounds
+/// after the first are only for services that failed to answer. None when the lookup was replaced.
+fn search_until(req: &Request, native: Option<Names>) -> Option<Outcome> {
+    // "Search again" (attempt > 0) looks once; a song's first search gets its retries.
+    let rounds = if req.attempt == 0 { 1 + req.opts.retries } else { 1 };
+    for round in 0..rounds {
+        if round > 0 && !lyrics_net::sleep(retry_pause(round, jitter())) {
+            return None;
+        }
+        if !lyrics_net::live() {
+            return None;
+        }
+        lyrics_net::reset_failed();
+        let outcome = if req.attempt == 0 { lookup(req, native.clone()) } else { lookup_other(req) };
+        match outcome {
+            Outcome::NotFound if lyrics_net::any_failed() => crate::log("lyrics lookup incomplete; services failed to answer"),
+            other => return Some(other),
+        }
+    }
+    Some(Outcome::NotFound)
 }
 
 /// The names to search under: the song as the player lists it and, when `resolve` is on and the
-/// title is in Latin letters, its native-script names from Apple's store in Japan. One search round
-/// tries them all.
-fn names_for(client: &HttpClient, info: &MediaInfo, resolve: bool) -> Vec<Names> {
+/// title is in Latin letters, its native-script names from Apple's store in Japan.
+fn names_for(info: &MediaInfo, resolve: bool) -> Vec<Names> {
     let original = Names { title: clean_title(&info.title), artist: primary_artist(&info.artist) };
     let mut names = vec![original.clone()];
     if resolve {
-        if let Some(native) = localized::lookup(client, &original, info.duration_ms) {
-            if native != original {
-                names.push(native);
-            }
+        if let Some(native) = localized::lookup(&original, info.duration_ms).filter(|n| *n != original) {
+            names.push(native);
         }
     }
     names
 }
 
-/// The song on LRCLIB under each of its names: a synced match at once, otherwise the first plain one.
-fn lrclib_best(client: &HttpClient, info: &MediaInfo, names: &[Names]) -> Option<Found> {
-    let duration_s = info.duration_ms as f64 / 1000.0;
-    let mut plain: Option<Found> = None;
-    for n in names {
-        let mut url = format!("{API}/get?track_name={}&artist_name={}", encode(&n.title), encode(&n.artist));
-        if !info.album.is_empty() {
-            url.push_str(&format!("&album_name={}", encode(&info.album)));
-        }
-        if duration_s > 0.0 {
-            url.push_str(&format!("&duration={}", duration_s.round() as u64));
-        }
-        if let Ok(body) = get(client, &url) {
-            if let Some(f) = serde_json::from_str::<Value>(&body).ok().and_then(|v| found_from(&v, info.duration_ms)) {
-                if f.synced {
-                    return Some(f);
-                }
-                plain = plain.or(Some(f));
+fn settled(r: &Option<Record>) -> bool {
+    r.as_ref().is_some_and(|r| r.synced() || matches!(r, Record::Instrumental))
+}
+
+fn outcome_of(r: Option<Record>) -> Outcome {
+    match r {
+        Some(Record::Lyrics(f)) => Outcome::Found(f),
+        Some(Record::Instrumental) => Outcome::Instrumental,
+        None => Outcome::NotFound,
+    }
+}
+
+/// Best lyrics for the song. LRCLIB is asked under the player's names first; the native-script names
+/// are looked up only when that finds nothing synced. Synced lyrics win: plain LRCLIB lyrics are kept
+/// only when nothing synced turns up, from LRCLIB or the fallback.
+fn lookup(req: &Request, native: Option<Names>) -> Outcome {
+    let (info, opts) = (&req.info, req.opts);
+    let original = Names { title: clean_title(&info.title), artist: primary_artist(&info.artist) };
+    let mut names = vec![original.clone()];
+    let resolved = native.is_some();
+    if let Some(n) = native.filter(|n| *n != original) {
+        names.push(n);
+    }
+    let mut best = lrclib::best(info, &names, &req.skip);
+    if !settled(&best) && opts.fallback && !resolved {
+        if let Some(n) = localized::lookup(&original, info.duration_ms).filter(|n| *n != original) {
+            if let Some(r) = lrclib::best(info, std::slice::from_ref(&n), &req.skip) {
+                best = if r.synced() || matches!(r, Record::Instrumental) || best.is_none() { Some(r) } else { best };
             }
-        }
-        let url = format!("{API}/search?track_name={}&artist_name={}", encode(&n.title), encode(&n.artist));
-        // LRCLIB being down must not stop the fallback, so a failed search is logged rather than returned.
-        let body = get(client, &url).unwrap_or_else(|e| {
-            crate::log(&format!("lrclib search failed: {e}"));
-            String::new()
-        });
-        let mut results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
-        results.retain(|v| same_version(&n.title, v));
-        if let Some(f) = pick_best(&results, duration_s).and_then(|v| found_from(v, info.duration_ms)) {
-            if f.synced {
-                return Some(f);
-            }
-            plain = plain.or(Some(f));
+            names.push(n);
         }
     }
-    plain
-}
-
-/// Best lyrics for the song. Synced ones win: plain LRCLIB lyrics are kept only when
-/// nothing synced turns up, from LRCLIB or the fallback.
-fn lookup(info: &MediaInfo, fallback: bool, words: bool) -> Result<Option<Found>> {
-    let client = client()?;
-    let names = names_for(&client, info, fallback);
-    let lrclib = lrclib_best(&client, info, &names);
-    if lrclib.as_ref().is_some_and(|f| f.synced) {
-        return Ok(lrclib);
+    if settled(&best) || !opts.fallback {
+        return outcome_of(best);
     }
-    if fallback {
-        if let Some(n) = netease::lookup(&client, &names, info.duration_ms, 1, words).into_iter().next() {
-            return Ok(Some(Found::from_netease(n, info.duration_ms)));
-        }
+    match netease::lookup(&names, info.duration_ms, 1, opts.words, &req.skip).into_iter().next() {
+        Some(n) => Outcome::Found(Found::from_netease(n, info.duration_ms)),
+        None => outcome_of(best),
     }
-    Ok(lrclib)
 }
 
-/// Another candidate for "Search again": the search results in order of fit, then a broader
-/// search by title alone, then the fallback's songs.
-fn lookup_other(info: &MediaInfo, attempt: usize, fallback: bool, words: bool) -> Result<Option<Found>> {
-    let client = client()?;
-    let names = names_for(&client, info, fallback);
-    let duration_s = info.duration_ms as f64 / 1000.0;
-    let mut candidates: Vec<Value> = Vec::new();
-    for n in &names {
-        for url in [
-            format!("{API}/search?track_name={}&artist_name={}", encode(&n.title), encode(&n.artist)),
-            format!("{API}/search?q={}", encode(&n.title)),
-        ] {
-            let body = get(&client, &url).unwrap_or_default();
-            let results: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
-            for v in ranked(&results, duration_s).into_iter().filter(|v| same_version(&n.title, v)) {
-                if !candidates.iter().any(|c| c.get("id") == v.get("id")) {
-                    candidates.push(v.clone());
-                }
-            }
-        }
+/// Another candidate for "Search again": LRCLIB's records in order of fit, then a broader search by
+/// title alone, then the fallback's songs.
+fn lookup_other(req: &Request) -> Outcome {
+    let info = &req.info;
+    let names = names_for(info, req.opts.fallback);
+    let mut usable = lrclib::candidates(info, &names, &req.skip);
+    if req.opts.fallback {
+        usable.extend(netease::lookup(&names, info.duration_ms, 3, req.opts.words, &req.skip).into_iter().map(|n| Found::from_netease(n, info.duration_ms)));
     }
-    let mut usable: Vec<Found> = candidates.iter().filter_map(|v| found_from(v, info.duration_ms)).collect();
-    if fallback {
-        usable.extend(netease::lookup(&client, &names, info.duration_ms, 3, words).into_iter().map(|n| Found::from_netease(n, info.duration_ms)));
+    if usable.is_empty() {
+        Outcome::NotFound
+    } else {
+        Outcome::Found(usable[req.attempt % usable.len()].clone())
     }
-    Ok(if usable.is_empty() { None } else { Some(usable[attempt % usable.len()].clone()) })
-}
-
-/// Whether an LRCLIB record is the same version of the song as `title` (not its live, remix or cover).
-/// A record with no name says nothing, so it passes.
-fn same_version(title: &str, record: &Value) -> bool {
-    record.get("trackName").and_then(Value::as_str).is_none_or(|name| crate::versions::mismatch(title, name).is_none())
-}
-
-/// Results ordered: synced and the right length, synced, the right length, then the rest.
-fn ranked(results: &[Value], duration_s: f64) -> Vec<&Value> {
-    let fits = |v: &Value| duration_s <= 0.0 || v.get("duration").and_then(Value::as_f64).is_none_or(|d| (d - duration_s).abs() <= DURATION_TOLERANCE_S);
-    let synced = |v: &Value| v.get("syncedLyrics").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
-    let mut v: Vec<&Value> = results.iter().collect();
-    v.sort_by_key(|r| (!(synced(r) && fits(r)), !synced(r), !fits(r)));
-    v
-}
-
-pub(crate) fn get(client: &HttpClient, url: &str) -> Result<String> {
-    let uri = Uri::CreateUri(&HSTRING::from(url))?;
-    Ok(client.GetStringAsync(&uri)?.get()?.to_string())
-}
-
-/// Lyrics from an LRCLIB record, synced when it has timestamps and otherwise spread over the song.
-fn found_from(v: &Value, duration_ms: u64) -> Option<Found> {
-    if let Some(synced) = v.get("syncedLyrics").and_then(Value::as_str) {
-        let lines = lrc::parse(synced);
-        if !lines.is_empty() {
-            return Some(Found::from_lrclib(lines, true));
-        }
-    }
-    let plain = v.get("plainLyrics").and_then(Value::as_str)?;
-    let lines = lrc::from_plain(plain, duration_ms);
-    (!lines.is_empty()).then(|| Found::from_lrclib(lines, false))
-}
-
-/// Prefers synced lyrics whose length matches the playing track.
-pub fn pick_best(results: &[Value], duration_s: f64) -> Option<&Value> {
-    let fits = |v: &&Value| {
-        duration_s <= 0.0
-            || v.get("duration").and_then(Value::as_f64).is_none_or(|d| (d - duration_s).abs() <= DURATION_TOLERANCE_S)
-    };
-    let synced = |v: &&Value| v.get("syncedLyrics").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
-    results
-        .iter()
-        .find(|v| fits(v) && synced(v))
-        .or_else(|| results.iter().find(synced))
-        .or_else(|| results.iter().find(fits))
 }
 
 /// Drops decorations such as "(Official Video)" or "- Remastered 2011" that confuse the search.
@@ -436,7 +481,10 @@ pub fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn synced(text: &str) -> Found {
+        Found::from_lrclib(crate::lrc::parse(text), true, "lrclib:1".into())
+    }
 
     #[test]
     fn percent_encoding() {
@@ -472,35 +520,37 @@ mod tests {
     }
 
     #[test]
-    fn retries_rank_synced_matches_first() {
-        let r = vec![json!({"id": 1, "duration": 400.0, "plainLyrics": "x"}), json!({"id": 2, "duration": 201.0, "syncedLyrics": "[00:01.00]a"}), json!({"id": 3, "duration": 400.0, "syncedLyrics": "[00:01.00]b"})];
-        let ids: Vec<i64> = ranked(&r, 200.0).iter().map(|v| v["id"].as_i64().unwrap()).collect();
-        assert_eq!(ids, vec![2, 3, 1]);
+    fn wrong_lyrics_are_remembered_per_song_once_and_bounded() {
+        let mut s = Shifts::default();
+        assert!(!s.block(1, ""), "lyrics without an id cannot be marked");
+        assert!(s.block(1, "lrclib:5"));
+        s.block(1, "lrclib:5");
+        assert_eq!(s.blocked(1), vec!["lrclib:5".to_string()]);
+        assert!(s.blocked(2).is_empty());
+        for i in 0..30 {
+            s.block(1, &format!("netease:{i}"));
+        }
+        let list = s.blocked(1);
+        assert_eq!(list.len(), MAX_BLOCKED);
+        assert_eq!(list.last().unwrap(), "netease:29");
+        // Old lyrics.json files, with shifts only, still load.
+        let old: Shifts = serde_json::from_str(r#"{"ms":{"7":500}}"#).unwrap();
+        assert_eq!((old.get(7), old.blocked(7).len()), (500, 0));
     }
 
     #[test]
-    fn best_result_prefers_synced_matching_length() {
-        let r = vec![
-            json!({"duration": 200.0, "plainLyrics": "x"}),
-            json!({"duration": 400.0, "syncedLyrics": "[00:01.00]far"}),
-            json!({"duration": 201.0, "syncedLyrics": "[00:01.00]near"}),
-        ];
-        assert_eq!(pick_best(&r, 200.0).unwrap()["syncedLyrics"], "[00:01.00]near");
-    }
-
-    #[test]
-    fn records_say_whether_they_are_synced() {
-        let synced = found_from(&json!({"syncedLyrics": "[00:01.00]a", "plainLyrics": "a"}), 100_000).unwrap();
-        assert!(synced.synced && synced.source == Source::Lrclib);
-        let plain = found_from(&json!({"plainLyrics": "a\nb"}), 100_000).unwrap();
-        assert!(!plain.synced);
-        assert!(found_from(&json!({}), 100_000).is_none());
+    fn retry_pauses_double_up_to_a_ceiling_with_a_little_jitter() {
+        assert_eq!(retry_pause(1, 0), Duration::from_secs(1));
+        assert_eq!(retry_pause(2, 0), Duration::from_secs(2));
+        assert_eq!(retry_pause(3, 0), Duration::from_secs(4));
+        assert_eq!(retry_pause(9, 0), RETRY_PAUSE_MAX);
+        assert_eq!(retry_pause(1, 999), Duration::from_millis(1249));
     }
 
     #[test]
     fn only_synced_lyrics_without_extras_ask_for_them_when_wanted() {
         let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: false };
-        let bare = found_from(&json!({"syncedLyrics": "[00:01.00]a"}), 100_000).unwrap();
+        let bare = synced("[00:01.00]a");
         assert!(needs_extras(&bare, opts));
         assert!(!needs_extras(&bare, Options { extras: false, ..opts }));
         // Word timing alone is reason enough, until the song has it.
@@ -509,10 +559,12 @@ mod tests {
         let timed = Found { words: vec![vec![Word { start_ms: 1000, dur_ms: 100, chars: 1 }]], ..bare.clone() };
         assert!(!needs_extras(&timed, words_only));
         assert!(!needs_extras(&bare, Options { fallback: false, ..opts }));
-        let plain = found_from(&json!({"plainLyrics": "a\nb"}), 100_000).unwrap();
+        let plain = Found::from_lrclib(crate::lrc::from_plain("a\nb", 100_000), false, String::new());
         assert!(!needs_extras(&plain, opts));
-        let with = Found { translation: vec![Line { at_ms: 1000, text: "x".into() }], ..bare };
+        let with = Found { translation: vec![Line { at_ms: 1000, text: "x".into() }], ..bare.clone() };
         assert!(!needs_extras(&with, opts));
+        // Your own files send nothing anywhere.
+        assert!(!needs_extras(&Found { source: Source::Local, ..bare }, opts));
     }
 
     #[test]
@@ -523,15 +575,50 @@ mod tests {
             translation: vec![Line { at_ms: 1000, text: "hola".into() }],
             romaji: Vec::new(),
             timed: crate::words::parse_yrc("[1000,500](1000,250,0)hel(1250,250,0)lo"),
+            id: "netease:1".into(),
         };
-        let mut f = found_from(&json!({"syncedLyrics": "[00:01.00]hello"}), 100_000).unwrap();
+        let mut f = synced("[00:01.00]hello");
         merge_extras(&mut f, lyrics(), opts, 100_000);
         assert_eq!(f.translation.len(), 1);
         assert!(f.has_words());
         // What the song already has is left alone.
-        let mut g = found_from(&json!({"syncedLyrics": "[00:01.00]hello"}), 100_000).unwrap();
+        let mut g = synced("[00:01.00]hello");
         merge_extras(&mut g, lyrics(), Options { extras: false, words: false, ..opts }, 100_000);
         assert!(g.translation.is_empty() && !g.has_words());
+    }
+
+    /// Uses a disposable data folder: `$env:APPDATA = ...\target\lyrics-toggle-test`, then
+    /// `cargo test -- --ignored known_songs_resolve --test-threads=1`.
+    #[test]
+    #[ignore = "writes the lyrics cache; requires isolated APPDATA ending in lyrics-toggle-test"]
+    fn known_songs_resolve_at_once_without_the_network() {
+        assert!(crate::config::data_dir().parent().unwrap().ends_with("lyrics-toggle-test"));
+        let opts = Options { fallback: true, cache: true, retries: 5, extras: false, words: false };
+        let info = |title: &str| MediaInfo { title: title.into(), artist: "Cache Test".into(), duration_ms: 200_000, ..Default::default() };
+        let req = |info: MediaInfo, automatic: bool| Request { info, attempt: 0, opts, automatic, verify: true, skip: Vec::new(), alias: false };
+        let _lane = lyrics_net::enter(Lane::Foreground(lyrics_net::next_foreground()));
+        let cached = info("Cached song");
+        lyrics_cache::store(cached.track_key(), cached.duration_ms, &synced("[00:01.00]from the cache"));
+        let missed = info("Song with nothing");
+        lyrics_cache::remove(missed.track_key());
+        lyrics_cache::store_empty(missed.track_key(), missed.duration_ms, Kind::Miss, true);
+        // A song fetched ahead under a store's spelling is found under the player's.
+        let ahead = info("cached song ahead");
+        lyrics_cache::store(lyrics_cache::alias_key("Cached song ahead (Remastered)", "CACHE TEST"), 200_000, &synced("[00:01.00]ahead"));
+        let started = Instant::now();
+        let hit = resolve(&req(cached, true), AUTOMATIC_DELAY);
+        assert!(matches!(hit, Some(Outcome::Found(ref f)) if f.lines[0].text == "from the cache"), "{hit:?}");
+        assert!(matches!(resolve(&req(missed, true), AUTOMATIC_DELAY), Some(Outcome::NotFound)), "a remembered miss is believed");
+        assert!(matches!(resolve(&req(ahead, true), AUTOMATIC_DELAY), Some(Outcome::Found(ref f)) if f.lines[0].text == "ahead"));
+        assert!(started.elapsed() < AUTOMATIC_DELAY, "no delay before what is already known");
+        assert_eq!(lyrics_net::counts().0, 0, "and no request");
+        // Lyrics marked wrong are not taken from the cache: the lookup goes on to the wait, and stops
+        // there because the lane was cancelled, before any request.
+        let wrong = info("Marked wrong");
+        lyrics_cache::store(wrong.track_key(), 200_000, &synced("[00:01.00]wrong"));
+        lyrics_net::cancel_foreground();
+        assert!(resolve(&Request { skip: vec!["lrclib:1".into()], ..req(wrong.clone(), true) }, AUTOMATIC_DELAY).is_none());
+        assert_eq!(lyrics_net::counts().0, 0);
     }
 
     #[test]

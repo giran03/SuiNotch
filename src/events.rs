@@ -17,11 +17,22 @@ pub const WM_APP_SHOW_SETTINGS: u32 = WM_APP + 6;
 /// One per vertical blank while the notch animates (see ticker.rs).
 pub const WM_APP_FRAME: u32 = WM_APP + 7;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaKind { #[default] Unknown, Music, Video }
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaInfo {
+    pub kind: MediaKind,
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// What else the player says about the track, to tell songs from podcasts, ads and videos
+    /// (see `song_gate`); empty or 0 when it says nothing.
+    pub album_artist: String,
+    pub track_number: u32,
+    pub track_count: u32,
+    pub genres: Vec<String>,
+    pub subtitle: String,
     pub app_id: String,
     pub playing: bool,
     pub position_ms: u64,
@@ -46,7 +57,7 @@ pub enum Event {
     SoundMessage(String),
     Media(Option<MediaInfo>),
     Artwork { key: u64, art: Option<crate::gfx::ArtPixels> },
-    Lyrics { key: u64, found: Option<crate::lyrics::Found> },
+    Lyrics { key: u64, generation: u64, outcome: crate::lyrics::Outcome },
     Volume { level: f32, muted: bool },
     AudioDeviceChanged,
     Network { connected: bool, name: String },

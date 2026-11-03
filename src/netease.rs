@@ -3,14 +3,12 @@
 
 use serde_json::Value;
 use windows::core::{Result, HSTRING};
-use windows::Foundation::Uri;
 use windows::Security::Cryptography::Core::{CryptographicEngine, HashAlgorithmNames, HashAlgorithmProvider, SymmetricAlgorithmNames, SymmetricKeyAlgorithmProvider};
 use windows::Security::Cryptography::{BinaryStringEncoding, CryptographicBuffer};
-use windows::Storage::Streams::UnicodeEncoding;
-use windows::Web::Http::{HttpClient, HttpStringContent};
 
 use crate::lrc::{self, Line};
-use crate::lyrics::{encode, get, Names};
+use crate::lyrics::{encode, Names};
+use crate::lyrics_net::{self, get, Fail};
 use crate::versions;
 use crate::words::{self, TimedLine};
 
@@ -32,16 +30,19 @@ pub struct Lyrics {
     pub romaji: Vec<Line>,
     /// The lines with each word's timing, when asked for and the song has it; empty otherwise.
     pub timed: Vec<TimedLine>,
+    /// "netease:<song id>", so lyrics marked wrong are not offered again.
+    pub id: String,
 }
 
 /// Lyrics for the best-fitting songs, best first, at most `limit` of them. The song is searched for
 /// under every name it goes by (as the player lists it, and in its native script), and a result
 /// counts if it fits any of them. With `word_timing`, each song's word-by-word lyrics are asked for too.
-pub fn lookup(client: &HttpClient, names: &[Names], duration_ms: u64, limit: usize, word_timing: bool) -> Vec<Lyrics> {
+/// Songs whose ids are in `skip` (lyrics marked wrong) are passed over.
+pub fn lookup(names: &[Names], duration_ms: u64, limit: usize, word_timing: bool, skip: &[String]) -> Vec<Lyrics> {
     let mut songs: Vec<Value> = Vec::new();
     for query in queries(names) {
         let url = format!("{API}/search/get?s={}&type=1&offset=0&limit={SEARCH_LIMIT}", encode(&query));
-        match get(client, &url) {
+        match get(&url) {
             Ok(body) => {
                 for song in songs_from(&body) {
                     if !songs.iter().any(|s| s.get("id") == song.get("id")) {
@@ -57,8 +58,10 @@ pub fn lookup(client: &HttpClient, names: &[Names], duration_ms: u64, limit: usi
     }
     pick_ids(&songs, names, duration_ms)
         .into_iter()
+        .filter(|id| !skip.contains(&format!("netease:{id}")))
         .filter_map(|id| {
-            let mut lyrics = get(client, &format!("{API}/song/lyric?id={id}&lv=1&tv=-1&rv=-1")).ok().and_then(|b| parse_lyric(&b))?;
+            let mut lyrics = get(&format!("{API}/song/lyric?id={id}&lv=1&tv=-1&rv=-1")).ok().and_then(|b| parse_lyric(&b))?;
+            lyrics.id = format!("netease:{id}");
             if word_timing {
                 lyrics.timed = word_by_word(id).unwrap_or_else(|e| {
                     crate::log(&format!("netease word timing failed: {e}"));
@@ -85,20 +88,11 @@ fn eapi_params(path: &str, body: &str) -> Result<String> {
 }
 
 /// A song's word-by-word lyrics, empty when NetEase has none for it.
-fn word_by_word(id: u64) -> Result<Vec<TimedLine>> {
+fn word_by_word(id: u64) -> std::result::Result<Vec<TimedLine>, Fail> {
     let body = format!(r#"{{"id":"{id}","lv":-1,"kv":-1,"tv":-1,"rv":-1,"yv":-1,"ytv":-1,"yrv":-1}}"#);
-    let params = eapi_params(EAPI_PATH, &body)?;
-    let client = HttpClient::new()?;
-    let headers = client.DefaultRequestHeaders()?;
-    let _ = headers.UserAgent()?.TryParseAdd(&HSTRING::from("Mozilla/5.0"));
-    let _ = headers.TryAppendWithoutValidation(&HSTRING::from("Cookie"), &HSTRING::from("os=pc; appver=2.10.8"));
-    let content = HttpStringContent::CreateFromStringWithEncodingAndMediaType(
-        &HSTRING::from(format!("params={params}")),
-        UnicodeEncoding::Utf8,
-        &HSTRING::from("application/x-www-form-urlencoded"),
-    )?;
-    let reply = client.PostAsync(&Uri::CreateUri(&HSTRING::from(EAPI))?, &content)?.get()?;
-    let text = reply.Content()?.ReadAsStringAsync()?.get()?.to_string();
+    let params = eapi_params(EAPI_PATH, &body).map_err(Fail::Net)?;
+    let headers = [("User-Agent", "Mozilla/5.0"), ("Cookie", "os=pc; appver=2.10.8")];
+    let text = lyrics_net::post_form(EAPI, &format!("params={params}"), &headers)?;
     Ok(timed_lines(&text))
 }
 
@@ -168,7 +162,7 @@ fn parse_lyric(body: &str) -> Option<Lyrics> {
         return None;
     }
     let extra = |pointer: &str| v.pointer(pointer).and_then(Value::as_str).map(|t| without_credits(lrc::parse(t))).unwrap_or_default();
-    Some(Lyrics { lines, translation: extra("/tlyric/lyric"), romaji: extra("/romalrc/lyric"), timed: Vec::new() })
+    Some(Lyrics { lines, translation: extra("/tlyric/lyric"), romaji: extra("/romalrc/lyric"), timed: Vec::new(), id: String::new() })
 }
 
 fn without_credits(mut lines: Vec<Line>) -> Vec<Line> {

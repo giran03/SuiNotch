@@ -64,8 +64,10 @@ pub struct App {
     pub lyrics_words: Vec<Vec<crate::words::Word>>,
     /// Songs played lately, newest first.
     pub recent: crate::recent::Recent,
-    /// Track whose lyrics were last requested, so each song is looked up once.
-    pub lyrics_requested: u64,
+    /// What tends to play after what, for fetching the next song's lyrics ahead.
+    pub history: crate::track_history::History,
+    /// Source permissions, request identity and cancellation state for lyric lookup.
+    pub lyric_request: crate::lyric_filter::State,
     /// "Search again" presses for the current song.
     pub lyrics_attempt: usize,
     pub shifts: crate::lyrics::Shifts,
@@ -167,6 +169,9 @@ impl App {
     }
     pub fn save_shifts(&self) {
         config::save_json("lyrics.json", &self.shifts);
+    }
+    pub fn save_history(&self) {
+        config::save_json("transitions.json", &self.history);
     }
 
     /// Any Focus tab clock is counting: Pomodoro, timer or stopwatch.

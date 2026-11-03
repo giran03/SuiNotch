@@ -23,6 +23,7 @@ version = "0.61"
 features = [
     "Foundation",
     "Foundation_Collections",
+    "Media",
     "Media_Control",
     "Storage_Streams",
     "Web_Http",

@@ -100,11 +100,44 @@ pub(super) fn task_snapshot(app: &mut App, path: &std::path::Path, scale: f32) -
     app.notch.hits.clear();
     cv.text(app.notch.page.label(), R::new(24.0, 8.0, 200.0, 22.0), 12.0, 600, views::DIM, gfx::Align::Left);
     let area = R::new(24.0, 40.0, w - 48.0, h - 58.0);
-    if app.notch.page == Page::Calendar {
+    if app.notch.page == Page::Updates {
+        crate::pages::updates(&cv, app, area);
+    } else if app.notch.page == Page::Calendar {
         crate::pages::calendar(&mut cv, app, area);
     } else {
         crate::pages::todo(&mut cv, app, area);
     }
+    unsafe { rt.EndDraw(None, None)? };
+    surface.save_png(&gfx, path, pw, ph)
+}
+
+/// Full off-screen notch including the floating lyric pill, for layout checks without desktop input.
+#[cfg(test)]
+pub(super) fn lyrics_snapshot(app: &mut App, path: &std::path::Path, scale: f32) -> Result<()> {
+    update_pill(app);
+    let (w, h, radius) = target_shape(app);
+    let look = app.cfg.lyric_look();
+    let n = &mut app.notch;
+    n.w.snap(w); n.h.snap(h); n.radius.snap(radius);
+    n.open.snap(if n.expanded { 1.0 } else { 0.0 });
+    n.pill_alpha.snap(n.pill_alpha.target);
+    n.pill_w.snap(n.pill_w.target);
+    n.pill_h.snap(n.pill_h.target);
+    n.line_fade.snap(1.0);
+    let room = if n.pill_alpha.value > 0.5 { look.room_below(n.pill_h.value) } else { 0.0 };
+    n.win = (w.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW), h + SHADOW + room);
+    let (pw, ph) = ((n.win.0 * scale).ceil() as i32, (n.win.1 * scale).ceil() as i32);
+    let mut surface = Surface::empty(); surface.ensure(pw, ph);
+    let rt = gfx::dc_render_target(&app.gfx)?;
+    unsafe {
+        rt.BindDC(surface.dc, &RECT { left: 0, top: 0, right: pw, bottom: ph })?;
+        rt.SetDpi(96.0 * scale, 96.0 * scale); rt.BeginDraw();
+    }
+    let gfx = app.gfx.clone();
+    let mut cv = Canvas::new(&gfx, rt.cast()?)?;
+    cv.clear(C::hex(0x252830));
+    app.notch.hits.clear();
+    views::draw_notch(&mut cv, app);
     unsafe { rt.EndDraw(None, None)? };
     surface.save_png(&gfx, path, pw, ph)
 }
@@ -210,6 +243,9 @@ pub fn sui_napping(app: &App) -> bool {
 pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
     let n = &app.notch;
     let mut next: u64 = 60_000;
+    if n.expanded && n.shown_page() == Page::Updates && n.update_preview.map(|p| p.busy()).unwrap_or_else(|| matches!(app.update, crate::update::Status::Downloading(_) | crate::update::Status::Installing(_))) {
+        next = next.min(33);
+    }
     if eq {
         next = next.min(42);
     }
@@ -364,11 +400,9 @@ pub(super) fn update_pill(app: &mut App) {
     let widths = visible_text.as_ref().map(|t| {
         let first = app.gfx.text_width(t, look.font(), 600);
         let second = second.as_ref().map(|s| app.gfx.text_width(s, look.second_font(), 500));
-        match (look.below_notch(), second) {
-            (false, Some(s)) => first + crate::lyric_draw::SUFFIX_GAP + s,
-            (true, Some(s)) => first.max(s),
-            (_, None) => first,
-        }
+        let inline = second.map_or(first, |s| first + crate::lyric_draw::SUFFIX_GAP + s);
+        let outside = second.map_or(first, |s| first.max(s));
+        (if look.below_notch() { outside } else { inline }, inline)
     });
     let n = &mut app.notch;
     let show = visible_text.is_some() && !n.expanded && n.alert.is_none() && !n.drag_over;
@@ -380,7 +414,8 @@ pub(super) fn update_pill(app: &mut App) {
     }
     n.pill_alpha.set(if show { 1.0 } else { 0.0 });
     n.pill_h.set(look.pill_height(tall));
-    if let Some(tw) = widths {
+    if let Some((tw, inline)) = widths {
+        n.pill_inline_w = inline.min(crate::lyric_style::MAX_LINE_W);
         n.pill_overflow = tw > crate::lyric_style::MAX_LINE_W;
         n.pill_w.set(tw.min(crate::lyric_style::MAX_LINE_W) + 34.0);
     }
@@ -451,6 +486,7 @@ pub(super) fn present(app: &App, pw: i32, ph: i32) {
         );
         if !IsWindowVisible(n.hwnd).as_bool() {
             let _ = ShowWindow(n.hwnd, SW_SHOWNOACTIVATE);
+            stacking::raise_for_interaction(app);
         }
     }
 }

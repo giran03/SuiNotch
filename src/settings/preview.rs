@@ -116,14 +116,16 @@ impl Ui<'_, '_> {
         self.cv.fill_rrect(R::new(body.x, body.y - 16.0, body.w, body.h + 16.0), 13.0, C::BLACK);
         self.cv.fill_rrect(R::centered(body.x + 20.0, body.cy(), 14.0, 14.0), 4.0, accent.a(0.8));
         let slot = R::new(body.x + 38.0, body.y, body.w - 38.0 - 40.0, body.h);
-        if look.below_notch() {
+        if look.in_notch() {
+            lyric_draw::draw_in_notch(self.cv, slot, &frame);
+        } else {
             self.cv.text("Song title", slot, 12.5, 600, C::WHITE, Align::Left);
+        }
+        if look.below_notch() {
             let h = look.pill_height(second.is_some());
             let widest = second.map_or(0.0, |s| self.cv.gfx.text_width(s, look.second_font(), 500)).max(self.cv.gfx.text_width(SAMPLE, look.font(), 600));
             let w = (widest + 34.0).min(stage.w - 16.0);
             lyric_draw::draw_under(self.cv, R::centered(stage.cx(), body.bottom() + 8.0 + h / 2.0, w, h), &frame);
-        } else {
-            lyric_draw::draw_in_notch(self.cv, slot, &frame);
         }
         self.cv.pop();
         // The sample replays, so the page keeps drawing while it is on screen.

@@ -26,10 +26,12 @@ pub const TILE_W: f32 = 96.0;
 mod clips;
 pub mod focus;
 mod stats;
+mod updates;
 
 pub use clips::clipboard;
 pub use focus::timer;
 pub use stats::stats;
+pub use updates::updates;
 
 // ------------------------------------------------------------------ shared
 
@@ -134,8 +136,9 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     cv.fill_circle(cx, cy, pr, C::WHITE);
     cv.glyph(if info.playing { icon::PAUSE } else { icon::PLAY }, cx + if info.playing { 0.0 } else { 1.0 }, cy, 14.0, C::BLACK);
     icon_button(cv, app, cx + 44.0, cy, 14.0, icon::NEXT, Hit::Next, C::WHITE);
-    let lyr_color = if lyrics_view { tint.mix(C::WHITE, 0.3) } else { DIM };
-    views::icon_button_with(cv, app, x0 + 10.0, cy, 12.0, Hit::LyricsToggle, |cv, s| views::lyrics_glyph(cv, x0 + 10.0, cy, s, lyr_color));
+    let lyrics_mode = app.cfg.lyrics_mode();
+    let lyr_color = if lyrics_mode != crate::lyric_style::LyricsMode::Off { tint.mix(C::WHITE, 0.3) } else { DIM };
+    views::icon_button_with(cv, app, x0 + 10.0, cy, 12.0, Hit::LyricsToggle, |cv, s| views::lyrics_mode_glyph(cv, x0 + 10.0, cy, s, lyr_color, lyrics_mode));
     let recent_color = if recent_view { tint.mix(C::WHITE, 0.3) } else { DIM };
     icon_button(cv, app, x0 + 36.0, cy, 12.0, '\u{E81C}', Hit::RecentToggle, recent_color);
     if info.sources > 1 {
@@ -229,14 +232,28 @@ fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
     cv.fill_rrect(r, 16.0, C::WHITE.a(0.05));
     let inner = r.inset(16.0, 10.0);
     let key = app.media.as_ref().map(|m| m.info.track_key()).unwrap_or(0);
-    if app.lyrics_key != key {
+    if app.media.is_none() {
+        cv.text("Play a song to see lyrics", inner, 12.5, 500, DIM, Align::Center);
+        return;
+    }
+    if app.lyric_request.searching && app.lyrics_key != key {
         cv.text("Looking for lyrics...", inner, 12.5, 500, DIM, Align::Center);
         return;
     }
     if app.lyrics.is_empty() {
-        cv.text("No lyrics for this song", R::new(inner.x, inner.cy() - 22.0, inner.w, 20.0), 12.5, 500, DIM, Align::Center);
-        let w = app.gfx.text_width("Search again", 12.5, 600) + 28.0;
-        pill_button(cv, app, R::centered(inner.cx(), inner.cy() + 14.0, w, 26.0), "Search again", Hit::LyricsRetry, false);
+        let skipped = !app.lyric_request.started;
+        let allowed = crate::lyric_filter::manual_allowed(app);
+        let message = if !app.cfg.lyrics_pill { "Lyrics are off" }
+            else if !allowed { "Lyric searches disabled for this player" }
+            else if app.lyric_request.settled == Some(crate::lyric_filter::Settled::Instrumental) { "Instrumental" }
+            else if skipped { app.lyric_request.skipped.unwrap_or("Automatic lyrics skipped for this source") }
+            else { "No lyrics found" };
+        cv.text(message, R::new(inner.x, inner.cy() - 22.0, inner.w, 20.0), 12.5, 500, DIM, Align::Center);
+        if allowed {
+            let label = if skipped { "Search lyrics anyway" } else { "Search again" };
+            let w = app.gfx.text_width(label, 12.5, 600) + 28.0;
+            pill_button(cv, app, R::centered(inner.cx(), inner.cy() + 14.0, w, 26.0), label, Hit::LyricsRetry, false);
+        }
         return;
     }
     let cur = app.current_line();
@@ -318,7 +335,18 @@ fn lyrics_tools(cv: &Canvas, app: &mut App, r: R) {
         cv.text(label, chip, 10.5, 650, if mode > 0 { C::WHITE } else { DIM }, Align::Center);
     }
     let w = app.gfx.text_width("Search again", 12.5, 600) + 24.0;
-    pill_button(cv, app, R::new(bar.right() - w - 3.0, bar.y + 3.0, w, bar.h - 6.0), "Search again", Hit::LyricsRetry, false);
+    let retry = R::new(bar.right() - w - 3.0, bar.y + 3.0, w, bar.h - 6.0);
+    // Lyrics from a service can be marked wrong, and synced ones kept; your own files are yours to edit.
+    let from_service = !app.lyric_request.id.is_empty() && app.lyrics_source.is_some_and(|(s, _)| s != crate::lyrics::Source::Local);
+    if from_service {
+        icon_button(cv, app, retry.x - 14.0, bar.cy(), 8.0, '\u{E8E0}', Hit::LyricsWrong, C::WHITE);
+        let keepable = app.cfg.lyrics_cache && app.lyrics_source.is_some_and(|(_, synced)| synced);
+        if keepable {
+            let (glyph, color) = if app.lyric_request.pinned { ('\u{E840}', C::WHITE) } else { ('\u{E718}', DIM) };
+            icon_button(cv, app, retry.x - 38.0, bar.cy(), 8.0, glyph, Hit::LyricsKeep, color);
+        }
+    }
+    pill_button(cv, app, retry, "Search again", Hit::LyricsRetry, false);
 }
 
 // ------------------------------------------------------------------ water
