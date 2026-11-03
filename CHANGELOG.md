@@ -2,6 +2,32 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.4] - 2026-11-03
+
+### Added
+- About now includes Debug actions for an Updates tab simulation, sample volume HUD and notification. Update previews close when you leave or collapse the tab, and never download or install anything.
+- Lyrics search only for likely songs by default, with a short playback delay, saved per-player Automatic / Manual / Never preferences, and Search lyrics anyway for uncertain sources. Browsers require manual search; Lyrics Off stops fetching while retaining already-loaded lyrics.
+- The lyrics icon cycles through Outside, Inside, Both and Off. Both shows the current lyric in the notch and below it at the same time; the chosen mode is saved and reflected in Settings and the live preview.
+- The next song's lyrics are fetched ahead while the current one plays, so they show the moment it starts. SuiNotch learns on this PC what tends to play next, or uses the next track of the album; it is limited to 30 lookups an hour and skipped on metered connections. Turn it off with Fetch the next song's lyrics ahead, or stop the learning with Learn what plays next.
+- A song check skips podcasts, audiobooks, ads, jingles and videos in automatic lyric searches, including podcasts in Spotify. Players you set to Automatic are checked against a music catalog when their metadata leaves doubt. The lyrics panel says why a track was skipped.
+- Your own lyric files: put .lrc or .txt files named "Artist - Title" in the new lyrics folder (Settings > Music and lyrics > Your own lyric files) and they are used first, offline.
+- Wrong lyrics and Keep buttons in the lyrics tool bar. Wrong lyrics are never offered for that song again; kept lyrics stay whatever later searches find.
+- Instrumental tracks say "Instrumental" instead of "No lyrics found".
+- Word-by-word timing from LRCLIB for songs that have it, without asking NetEase.
+- Diagnostics lists the last lyric lookups and the song check for the track playing.
+- A temporary Updates tab appears when an update is available. Download and verify the update, then install and restart when ready. The tab shows downloading, ready, installing and retry states and hides after completion.
+
+### Changed
+- Lyrics already known show at once instead of after the two-second wait, and fewer requests are made. The native-script name is only looked up when needed. LRCLIB's exact match and search are asked together. A song with no lyrics is remembered for three days instead of being searched six times on every play. Retries now happen only when a service fails to answer, waiting longer each time and honouring the service's request to slow down. Every request times out after 8 seconds.
+- When the network comes back, a song whose lyrics could not be fetched is searched again.
+
+### Fixed
+- The privacy notes now list NetEase and Apple's store, which the lyrics fallback (on by default) contacts.
+- Cycling lyric placement or Off/On preserves already-found lyrics and their translations/word timing for the current song. Browser sources require an explicit lyric search, including those with an older Automatic preference; toggling display options never starts a browser search.
+- The notch restores its always-on-top position after switching windows, reappearing or resuming, without taking keyboard focus. A lightweight recovery check also handles apps that restack later, while preserving full-screen hiding.
+- Sound previews change only the clicked Play button to Stop, even when several reminders use the same sound.
+- Closing the completed Updates tab returns to the page you were using without opening a hidden page.
+
 ## [1.0.3] - 2026-11-02
 
 ### Added
