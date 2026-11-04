@@ -79,13 +79,7 @@ pub fn policy(cfg: &Config, info: &MediaInfo) -> Policy {
             Policy::Manual
         };
     }
-    saved.unwrap_or_else(|| {
-        if music_player(&info.app_id) {
-            Policy::Automatic
-        } else {
-            Policy::Manual
-        }
-    })
+    saved.unwrap_or(Policy::Automatic)
 }
 
 /// What an automatic lookup may do for the track playing.
@@ -106,14 +100,8 @@ pub fn gate(cfg: &Config, info: &MediaInfo) -> Gate {
         return Gate::Skip(None);
     }
     let known = music_player(&info.app_id);
-    let opted_in = cfg.lyrics_sources.get(&info.app_id) == Some(&Policy::Automatic);
-    if !known && !opted_in {
-        return Gate::Skip(None);
-    }
-    match song_gate::remembered(info.track_key()) {
-        Some(false) => return Gate::Skip(Some(song_gate::NOT_IN_CATALOG)),
-        Some(true) => return Gate::Fetch,
-        None => {}
+    if song_gate::remembered(info.track_key()) == Some(true) {
+        return Gate::Fetch;
     }
     let a = assessment(info);
     match a.verdict {
@@ -147,7 +135,6 @@ pub enum Settled {
     Lyrics,
     Instrumental,
     NotFound,
-    NotSong,
 }
 
 #[derive(Default)]
@@ -299,11 +286,6 @@ pub fn apply(app: &mut App, key: u64, generation: u64, outcome: Outcome) {
         Outcome::Found(f) => (Settled::Lyrics, Some(f)),
         Outcome::Instrumental => (Settled::Instrumental, None),
         Outcome::NotFound => (Settled::NotFound, None),
-        Outcome::NotSong(why) => {
-            app.lyric_request.skipped = Some(why);
-            app.lyric_request.started = false;
-            (Settled::NotSong, None)
-        }
     };
     app.lyric_request.settled = Some(settled);
     app.lyrics_source = found.as_ref().map(|f| (f.source, f.synced));
@@ -316,10 +298,8 @@ pub fn apply(app: &mut App, key: u64, generation: u64, outcome: Outcome) {
     app.lyrics_romaji = f.romaji;
     app.lyrics_words = f.words;
     app.lyrics_key = key;
-    if settled != Settled::NotSong {
-        if let Some(plan) = plan_ahead(app) {
-            crate::lyrics_prefetch::start(plan);
-        }
+    if let Some(plan) = plan_ahead(app) {
+        crate::lyrics_prefetch::start(plan);
     }
 }
 
@@ -410,15 +390,13 @@ mod tests {
         }
     }
     #[test]
-    fn browsers_and_unknown_sources_are_manual_even_when_reporting_music() {
+    fn browsers_are_manual_and_all_other_players_default_to_automatic() {
         let cfg = Config::default();
         for id in [
             "chrome.exe",
             "msedge.exe",
             "firefox",
             "brave.exe",
-            "vlc.exe",
-            "unknown",
             "Spotify browser",
         ] {
             assert!(!automatic(&cfg, &song(id)), "{id}");
@@ -428,7 +406,11 @@ mod tests {
             "AppleInc.AppleMusicWin!App",
             "foobar2000.exe",
             "MusicBee.exe",
+            "vlc.exe",
+            "unknown",
+            "Wavee.exe",
         ] {
+            assert_eq!(policy(&cfg, &song(id)), Policy::Automatic, "{id}");
             assert!(automatic(&cfg, &song(id)), "{id}");
         }
     }
@@ -466,20 +448,19 @@ mod tests {
         let mut cfg = Config::default();
         let episode = MediaInfo { title: "Episode 41: Interview".into(), duration_ms: 3_000_000, ..song("Spotify.exe") };
         assert_eq!(gate(&cfg, &episode), Gate::Skip(Some("Looks like a podcast episode")));
-        // An opted-in general player with bare metadata is checked against a catalog, unless other
+        // A general player with bare metadata is checked against a catalog, unless other
         // services are off, in which case it is fetched as before.
         let bare = MediaInfo { duration_ms: 200_000, ..song("mpv.exe") };
-        cfg.lyrics_sources.insert(bare.app_id.clone(), Policy::Automatic);
         assert_eq!(gate(&cfg, &bare), Gate::Verify);
         cfg.lyrics_fallback = false;
         assert_eq!(gate(&cfg, &bare), Gate::Fetch);
         cfg.lyrics_fallback = true;
         let tagged = MediaInfo { album: "Album".into(), track_number: 3, ..bare.clone() };
         assert_eq!(gate(&cfg, &tagged), Gate::Fetch);
-        // What a catalog said about a track is remembered.
+        // A catalog miss cannot block a lyrics search, even if remembered by an older lookup.
         let checked = MediaInfo { title: "Checked once".into(), ..bare };
         crate::song_gate::remember(checked.track_key(), false);
-        assert_eq!(gate(&cfg, &checked), Gate::Skip(Some(crate::song_gate::NOT_IN_CATALOG)));
+        assert_eq!(gate(&cfg, &checked), Gate::Verify);
     }
     #[test]
     fn browser_gate_overrides_saved_automatic_and_preserves_never() {

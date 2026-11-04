@@ -62,7 +62,7 @@ pub struct Config {
     pub clock_format: usize,
     pub glass: bool,
     // Music and lyrics
-    /// Per-player automatic, manual or never lyric lookup; absent sources use song detection.
+    /// Per-player lyric lookup; absent non-browser sources default to Automatic.
     pub lyrics_sources: std::collections::BTreeMap<String, crate::lyric_filter::Policy>,
     pub lyrics_auto: bool,
     pub lyrics_pill: bool,

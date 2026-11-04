@@ -27,6 +27,7 @@ use crate::sys::{self, Monitor};
 use crate::views;
 
 mod input;
+pub(crate) mod context_menu;
 mod kinds;
 mod reminders;
 mod render;
@@ -143,6 +144,7 @@ pub struct Notch {
     pub shelf_clear: Spring,
     pub drag_over: bool,
     pub own_drag: bool,
+    pub menu_open: bool,
     pub todo_scroll: Spring,
     pub new_due: Option<i64>,
     pub new_color: usize,
@@ -264,6 +266,7 @@ impl Notch {
             shelf_clear: Spring::new(1.0, 0.35, 1.0),
             drag_over: false,
             own_drag: false,
+            menu_open: false,
             todo_scroll: Spring::new(0.0, 0.35, 1.0),
             new_due: None,
             new_color: 0,
@@ -724,7 +727,7 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
                 T_LEAVE => {
                     unsafe { KillTimer(Some(app.notch.hwnd), T_LEAVE).ok() };
                     let editing = app.notch.page == Page::Todo && app.notch.field.as_ref().is_some_and(|f| !f.text.is_empty());
-                    let busy = editing || app.notch.own_drag || app.notch.drag_over;
+                    let busy = editing || app.notch.own_drag || app.notch.drag_over || app.notch.menu_open;
                     if !app.notch.hovering && !busy {
                         collapse(app);
                     }
@@ -765,6 +768,16 @@ fn handle(app: &mut App, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRE
         WM_LBUTTONDBLCLK => {
             let (x, y) = point(lparam, scale, app.notch.gap.value);
             on_double_click(app, x, y);
+            Some(LRESULT(0))
+        }
+        WM_CONTEXTMENU => {
+            context_menu::open(app, lparam);
+            Some(LRESULT(0))
+        }
+        WM_MEASUREITEM if context_menu::measure(app, lparam) => Some(LRESULT(1)),
+        WM_DRAWITEM if context_menu::draw(app, lparam) => Some(LRESULT(1)),
+        WM_ENTERIDLE if wparam.0 == MSGF_MENU as usize => {
+            context_menu::idle_popup(HWND(lparam.0 as *mut _));
             Some(LRESULT(0))
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {

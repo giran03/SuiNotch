@@ -178,17 +178,16 @@ impl Ui<'_, '_> {
             1 => "1 retry".to_string(),
             n => format!("{n} retries"),
         };
-        self.stepper(c, r[2], "Keep searching for", Some("When a lyrics service does not answer, try again this many times, waiting longer each time"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
+        self.stepper(c, r[2], "Keep searching for", Some("If no lyrics are found, try again this many times; stop when lyrics are found"), |c| &mut c.lyrics_retries, 1, 0, config::MAX_LYRICS_RETRIES, &tries);
         self.section("Lyric searches");
         let r = self.card(&[ROW_SUB]);
         if let Some(info) = media {
-            let name = format!("{} lyric searches", crate::media::source_name(&info.app_id));
             let help = if crate::lyric_filter::is_browser(&info.app_id) { "Browsers need an explicit search; click for Manual or Never" } else { "Click to cycle Automatic, Manual, Never; remembered for this player" };
-            self.button(r[0], &name, Some(help), crate::lyric_filter::policy(c, info).label(), Act::LyricsSource, false);
+            self.button(r[0], "Lyric search mode", Some(help), crate::lyric_filter::policy(c, info).label(), Act::LyricsSource, false);
         } else {
             self.button(r[0], "Per-player lyric searches", Some("Play something to change its player's preference"), "No player", Act::LyricsSource, false);
         }
-        self.cv.wrapped("Automatic waits 2 seconds, skips podcasts, ads and videos, and checks unclear tracks with a music catalog. Browsers always need a manual search. Unknown players default to manual. Never blocks searches. Lyrics Off keeps loaded lyrics and stops searching.", R::new(self.x + 4.0, self.y, self.w - 8.0, 54.0), 11.5, 500, DIM, Align::Left);
+        self.cv.wrapped("Players default to Automatic: wait 2 seconds, skip podcasts, ads and videos, then search until lyrics are found or the retry limit is reached. Browsers always need a manual search. Never blocks searches. Lyrics Off keeps loaded lyrics and stops searching.", R::new(self.x + 4.0, self.y, self.w - 8.0, 54.0), 11.5, 500, DIM, Align::Left);
         self.y += 66.0;
         let preview = self.lyric_look_settings(c, extras);
         self.section("Now playing");
@@ -280,9 +279,9 @@ impl Ui<'_, '_> {
         self.section("Events from your calendar");
         if c.calendar_url.is_empty() {
             let r = self.card(&[ROW_SUB, ROW_SUB]);
-            let sub = if app.calendar_error.is_empty() { "Copy your calendar's iCal address, then press Paste link" } else { app.calendar_error.as_str() };
+            let sub = if app.calendar_error.is_empty() { "Copy an iCal address or public Google Calendar embed link, then paste" } else { app.calendar_error.as_str() };
             self.button(r[0], "Add a calendar link", Some(sub), "Paste link", Act::PasteCalendar, false);
-            self.label(r[1], "Where to find it", Some("Outlook: Publish a calendar, ICS link.  Google: Secret address in iCal format"));
+            self.label(r[1], "Where to find it", Some("Outlook: Publish a calendar, ICS link. Google: public embed or public/private iCal address"));
             return;
         }
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB]);

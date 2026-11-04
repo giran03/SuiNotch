@@ -76,7 +76,11 @@ pub fn describe(hit: Hit, ctx: &Context) -> Option<String> {
         Hit::ClipItem(_) => "Click to copy it back",
         _ => return None,
     };
-    Some(text.to_string())
+    Some(match hit {
+        Hit::LyricsToggle => format!("{text}; right-click for all modes"),
+        Hit::Source => format!("{text}; right-click to choose a player"),
+        _ => text.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -96,12 +100,12 @@ mod tests {
     fn wording_follows_the_state_of_a_toggle() {
         let on = Context { lyrics_mode: LyricsMode::Inside, muted: true, ..Context::default() };
         let off = Context::default();
-        assert_eq!(describe(Hit::LyricsToggle, &on).as_deref(), Some("Lyrics inside; click to show both"));
+        assert_eq!(describe(Hit::LyricsToggle, &on).as_deref(), Some("Lyrics inside; click to show both; right-click for all modes"));
         let both = Context { lyrics_mode: LyricsMode::Both, ..Context::default() };
-        assert_eq!(describe(Hit::LyricsToggle, &both).as_deref(), Some("Lyrics inside and outside; click to turn off"));
-        assert_eq!(describe(Hit::LyricsToggle, &off).as_deref(), Some("Lyrics off; click to show outside"));
+        assert_eq!(describe(Hit::LyricsToggle, &both).as_deref(), Some("Lyrics inside and outside; click to turn off; right-click for all modes"));
+        assert_eq!(describe(Hit::LyricsToggle, &off).as_deref(), Some("Lyrics off; click to show outside; right-click for all modes"));
         let outside = Context { lyrics_mode: LyricsMode::Outside, ..Context::default() };
-        assert_eq!(describe(Hit::LyricsToggle, &outside).as_deref(), Some("Lyrics outside; click to show inside"));
+        assert_eq!(describe(Hit::LyricsToggle, &outside).as_deref(), Some("Lyrics outside; click to show inside; right-click for all modes"));
         assert_eq!(describe(Hit::Volume, &on).as_deref(), Some("Unmute"));
         assert_eq!(describe(Hit::Volume, &off).as_deref(), Some("Mute"));
     }

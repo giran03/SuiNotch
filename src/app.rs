@@ -105,6 +105,7 @@ pub enum Deferred {
     DragClip(usize),
     OpenSettings(Option<usize>),
     ImportSound(Option<String>),
+    MusicMenu(crate::notch::Hit, windows::Win32::Foundation::POINT),
     Exit,
 }
 
@@ -138,6 +139,7 @@ fn run_deferred() {
             Deferred::DragClip(i) => crate::dnd::drag_clip(i),
             Deferred::OpenSettings(page) => crate::settings::open(page),
             Deferred::ImportSound(replacement) => crate::settings::sounds::choose_file(replacement),
+            Deferred::MusicMenu(hit, point) => crate::notch::context_menu::show(hit, point),
             Deferred::Exit => { crate::sound::stop(); unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) } },
         }
     }

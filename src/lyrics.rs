@@ -76,8 +76,6 @@ pub enum Outcome {
     /// The song has no words.
     Instrumental,
     NotFound,
-    /// A music catalog does not know it, so it is likely not a song; the reason is shown.
-    NotSong(&'static str),
 }
 
 /// Word lists as they are kept: vetted (see `words::vet`), and none at all when no line has any left.
@@ -179,8 +177,7 @@ pub struct Request {
     /// 0 for the best match; each "Search again" moves on to another candidate.
     pub attempt: usize,
     pub opts: Options,
-    /// Started by SuiNotch rather than by a click: it waits a moment before using the network, and
-    /// believes a remembered "nothing found".
+    /// Started by SuiNotch rather than by a click: waits a moment before using the network.
     pub automatic: bool,
     /// The player is not known for songs and its metadata leaves doubt: ask a music catalog first.
     pub verify: bool,
@@ -241,7 +238,7 @@ pub fn resolve(req: &Request, delay: Duration) -> Option<Outcome> {
             match cached {
                 Some(Cached::Lyrics(f)) => return Some(Outcome::Found(with_extras(store_key, &req.info, f, opts))),
                 Some(Cached::Instrumental) => return Some(Outcome::Instrumental),
-                Some(Cached::Miss) if req.automatic => return Some(Outcome::NotFound),
+                // A previous miss must not prevent the current song's configured search rounds.
                 _ => {}
             }
         }
@@ -261,8 +258,7 @@ pub fn resolve(req: &Request, delay: Duration) -> Option<Outcome> {
                 native = names;
             }
             Verified::NotSong => {
-                crate::song_gate::remember(key, false);
-                return Some(Outcome::NotSong(crate::song_gate::NOT_IN_CATALOG));
+                // Catalog coverage is incomplete; the lyrics services may still have this song.
             }
             // The catalog could not be asked: search as for any song rather than give up.
             Verified::Unknown => {}
@@ -342,22 +338,31 @@ fn jitter() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_millis() as u64)
 }
 
-/// Searches until something is found or every service has answered that it has nothing. Rounds
-/// after the first are only for services that failed to answer. None when the lookup was replaced.
+/// Searches until lyrics are found or the configured retry limit is reached.
 fn search_until(req: &Request, native: Option<Names>) -> Option<Outcome> {
     // "Search again" (attempt > 0) looks once; a song's first search gets its retries.
     let rounds = if req.attempt == 0 { 1 + req.opts.retries } else { 1 };
-    for round in 0..rounds {
-        if round > 0 && !lyrics_net::sleep(retry_pause(round, jitter())) {
-            return None;
-        }
+    search_rounds(rounds, || {
         if !lyrics_net::live() {
             return None;
         }
         lyrics_net::reset_failed();
         let outcome = if req.attempt == 0 { lookup(req, native.clone()) } else { lookup_other(req) };
-        match outcome {
-            Outcome::NotFound if lyrics_net::any_failed() => crate::log("lyrics lookup incomplete; services failed to answer"),
+        if matches!(outcome, Outcome::NotFound) && lyrics_net::any_failed() {
+            crate::log("lyrics lookup incomplete; services failed to answer");
+        }
+        Some(outcome)
+    }, |round| lyrics_net::sleep(retry_pause(round, jitter())))
+}
+
+/// Shared retry lifecycle; injected lookup and wait keep regression checks off the network.
+fn search_rounds(rounds: u32, mut lookup: impl FnMut() -> Option<Outcome>, mut wait: impl FnMut(u32) -> bool) -> Option<Outcome> {
+    for round in 0..rounds {
+        if round > 0 && !wait(round) {
+            return None;
+        }
+        match lookup()? {
+            Outcome::NotFound => {}
             other => return Some(other),
         }
     }
@@ -548,6 +553,37 @@ mod tests {
     }
 
     #[test]
+    fn searches_retry_misses_until_found_or_the_configured_limit() {
+        let mut calls = 0;
+        let mut waits = Vec::new();
+        let result = search_rounds(6, || {
+            calls += 1;
+            Some(if calls == 3 { Outcome::Found(synced("[00:01.00]found")) } else { Outcome::NotFound })
+        }, |round| { waits.push(round); true });
+        assert!(matches!(result, Some(Outcome::Found(_))));
+        assert_eq!(calls, 3, "stop as soon as lyrics are found");
+        assert_eq!(waits, vec![1, 2]);
+
+        for retries in [0, 1, 5, crate::config::MAX_LYRICS_RETRIES] {
+            let mut calls = 0;
+            let result = search_rounds(1 + retries, || { calls += 1; Some(Outcome::NotFound) }, |_| true);
+            assert!(matches!(result, Some(Outcome::NotFound)));
+            assert_eq!(calls, 1 + retries, "initial round plus the saved retry count");
+        }
+    }
+
+    #[test]
+    fn retrying_stops_for_instrumentals_or_cancellation() {
+        let result = search_rounds(6, || Some(Outcome::Instrumental), |_| panic!("instrumentals must not retry"));
+        assert!(matches!(result, Some(Outcome::Instrumental)));
+        let mut calls = 0;
+        let result = search_rounds(6, || { calls += 1; Some(Outcome::NotFound) }, |_| false);
+        assert!(result.is_none());
+        assert_eq!(calls, 1, "cancelling during the wait prevents the next lookup");
+        assert!(search_rounds(6, || None, |_| panic!("a cancelled lookup must not retry")).is_none());
+    }
+
+    #[test]
     fn only_synced_lyrics_without_extras_ask_for_them_when_wanted() {
         let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: false };
         let bare = synced("[00:01.00]a");
@@ -608,7 +644,6 @@ mod tests {
         let started = Instant::now();
         let hit = resolve(&req(cached, true), AUTOMATIC_DELAY);
         assert!(matches!(hit, Some(Outcome::Found(ref f)) if f.lines[0].text == "from the cache"), "{hit:?}");
-        assert!(matches!(resolve(&req(missed, true), AUTOMATIC_DELAY), Some(Outcome::NotFound)), "a remembered miss is believed");
         assert!(matches!(resolve(&req(ahead, true), AUTOMATIC_DELAY), Some(Outcome::Found(ref f)) if f.lines[0].text == "ahead"));
         assert!(started.elapsed() < AUTOMATIC_DELAY, "no delay before what is already known");
         assert_eq!(lyrics_net::counts().0, 0, "and no request");
@@ -617,6 +652,7 @@ mod tests {
         let wrong = info("Marked wrong");
         lyrics_cache::store(wrong.track_key(), 200_000, &synced("[00:01.00]wrong"));
         lyrics_net::cancel_foreground();
+        assert!(resolve(&req(missed, true), AUTOMATIC_DELAY).is_none(), "a cached miss proceeds to the network wait, which cancellation stops");
         assert!(resolve(&Request { skip: vec!["lrclib:1".into()], ..req(wrong.clone(), true) }, AUTOMATIC_DELAY).is_none());
         assert_eq!(lyrics_net::counts().0, 0);
     }

@@ -82,6 +82,15 @@ pub fn request_frame(app: &mut App) {
 
 /// Exercise the real page renderer without displaying a window or using desktop input.
 #[cfg(test)]
+pub(super) fn dc_snapshot(gfx: &gfx::Gfx, path: &std::path::Path, width: i32, height: i32, draw: impl FnOnce(HDC)) -> Result<()> {
+    let mut surface = Surface::empty();
+    surface.ensure(width, height);
+    draw(surface.dc);
+    surface.save_png(gfx, path, width, height)
+}
+
+/// Exercise the real page renderer without displaying a window or using desktop input.
+#[cfg(test)]
 pub(super) fn task_snapshot(app: &mut App, path: &std::path::Path, scale: f32) -> Result<()> {
     let (w, h) = app.notch.page.size(false);
     let (pw, ph) = ((w * scale) as i32, (h * scale) as i32);
@@ -117,6 +126,7 @@ pub(super) fn lyrics_snapshot(app: &mut App, path: &std::path::Path, scale: f32)
     update_pill(app);
     let (w, h, radius) = target_shape(app);
     let look = app.cfg.lyric_look();
+    let notice_size = views::notice_size(app);
     let n = &mut app.notch;
     n.w.snap(w); n.h.snap(h); n.radius.snap(radius);
     n.open.snap(if n.expanded { 1.0 } else { 0.0 });
@@ -124,8 +134,9 @@ pub(super) fn lyrics_snapshot(app: &mut App, path: &std::path::Path, scale: f32)
     n.pill_w.snap(n.pill_w.target);
     n.pill_h.snap(n.pill_h.target);
     n.line_fade.snap(1.0);
-    let room = if n.pill_alpha.value > 0.5 { look.room_below(n.pill_h.value) } else { 0.0 };
-    n.win = (w.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW), h + SHADOW + room);
+    let room = notice_size.map_or_else(|| if n.pill_alpha.value > 0.5 { look.room_below(n.pill_h.value) } else { 0.0 }, |(_, h)| h + crate::lyric_style::ROOM_PAD);
+    let outside_w = notice_size.map_or(n.pill_w.value, |(w, _)| w);
+    n.win = (w.max(outside_w) + 2.0 * (FLARE + SHADOW), h + SHADOW + room);
     let (pw, ph) = ((n.win.0 * scale).ceil() as i32, (n.win.1 * scale).ceil() as i32);
     let mut surface = Surface::empty(); surface.ensure(pw, ph);
     let rt = gfx::dc_render_target(&app.gfx)?;
@@ -425,12 +436,15 @@ pub(super) fn update_pill(app: &mut App) {
 pub(super) fn render(app: &mut App) -> Result<(f32, f32)> {
     let t0 = Instant::now();
     let lyric_room = app.cfg.lyric_look().room_below(app.notch.pill_h.value);
+    let notice_size = views::notice_size(app);
     let n = &mut app.notch;
     let pill = n.pill_alpha.value > 0.01;
-    let max_w = n.w.value.max(n.pill_w.value) + 2.0 * (FLARE + SHADOW);
+    let outside_w = notice_size.map_or(n.pill_w.value, |(w, _)| w);
+    let max_w = n.w.value.max(outside_w) + 2.0 * (FLARE + SHADOW);
     let win_w = max_w.ceil();
     let gap = n.gap.value.max(0.0);
-    let win_h = (gap + n.h.value + SHADOW + if pill { lyric_room } else { 0.0 }).ceil().max(8.0);
+    let room = notice_size.map_or(if pill { lyric_room } else { 0.0 }, |(_, h)| h + crate::lyric_style::ROOM_PAD);
+    let win_h = (gap + n.h.value + SHADOW + room).ceil().max(8.0);
     n.win = (win_w, win_h);
     let scale = n.scale;
     let (pw, ph) = ((win_w * scale).ceil() as i32, (win_h * scale).ceil() as i32);

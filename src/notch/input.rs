@@ -55,7 +55,7 @@ pub(super) fn on_mouse_move(app: &mut App, x: f32, y: f32) {
         app.notch.volume_open.set(0.0);
     }
     if app.notch.vol_drag {
-        set_volume_from(app, y);
+        set_volume_from(app, x, y);
     }
     if app.notch.seek_drag.is_some() {
         if let Some(r) = views::seek_bar_rect(app) {
@@ -96,9 +96,9 @@ pub(super) fn on_mouse_leave(app: &mut App) {
     request_frame(app);
 }
 
-pub(super) fn set_volume_from(app: &mut App, y: f32) {
+pub(super) fn set_volume_from(app: &mut App, x: f32, y: f32) {
     if let (Some(r), Some(audio)) = (views::volume_bar_rect(app), app.audio.as_ref()) {
-        audio.set((1.0 - (y - r.y) / r.h).clamp(0.0, 1.0));
+        audio.set(views::volume_fraction(r, x, y));
     }
 }
 
@@ -111,7 +111,7 @@ pub(super) fn on_button_down(app: &mut App, x: f32, y: f32) {
     match hit {
         Some(Hit::VolumeBar) => {
             app.notch.vol_drag = true;
-            set_volume_from(app, y);
+            set_volume_from(app, x, y);
         }
         Some(Hit::Seek) => {
             if let Some(r) = views::seek_bar_rect(app) {

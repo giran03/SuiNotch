@@ -161,6 +161,39 @@ fn pin(key: SourceKey) {
     *PINNED.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, std::time::Instant::now()));
 }
 
+/// A live session handle keeps a menu selection tied to its player even if the list changes.
+pub struct SourceChoice {
+    pub label: String,
+    pub selected: bool,
+    session: Session,
+}
+
+pub fn source_choices() -> Vec<SourceChoice> {
+    let all = sessions();
+    let keys = source_keys(&all);
+    let active = active_session();
+    all.iter().zip(&keys).map(|(session, key)| {
+        let name = source_name(&key.0);
+        let label = if keys.iter().filter(|other| other.0 == key.0).count() > 1 {
+            format!("{name} (session {})", key.1 + 1)
+        } else { name };
+        SourceChoice { label, selected: active.as_ref() == Some(session), session: session.clone() }
+    }).collect()
+}
+
+pub fn select_source(choice: SourceChoice) {
+    std::thread::spawn(move || {
+        let all = sessions();
+        // A player closed while its menu was open: leave the current selection alone.
+        let Some(index) = all.iter().position(|session| *session == choice.session) else { return };
+        let key = source_keys(&all)[index].clone();
+        *PREFERRED.lock().unwrap_or_else(|e| e.into_inner()) = key.0.clone();
+        post(Event::PlayerPicked(key.0.clone()));
+        pin(key);
+        resubscribe();
+    });
+}
+
 /// Picks the remembered player when its session appears: at startup, or when the app reopens.
 fn adopt_preferred() {
     let ids: Vec<String> = source_keys(&sessions()).into_iter().map(|k| k.0).collect();

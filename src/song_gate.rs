@@ -23,7 +23,6 @@ pub struct Assessment {
     pub why: Option<&'static str>,
 }
 
-pub const NOT_IN_CATALOG: &str = "Not found in a music catalog";
 const SONG_AT: i32 = 2;
 const NOT_SONG_AT: i32 = -3;
 /// Shorter than this is a jingle or an ad; longer than the other a mix, an episode or a stream.

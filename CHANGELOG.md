@@ -2,6 +2,20 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.5] - 2026-11-04
+
+### Added
+- Right-click the lyrics mode button to choose Outside, Inside, Both or Off, or the audio source button to choose an open player directly. Menus mark the current choice; left-click still cycles.
+
+### Changed
+- The Music volume slider opens horizontally when lyrics are closed and there is enough room beside the playback controls. It stays vertical with lyrics open or in a compact layout.
+- Public Google Calendar embed links are converted to their iCal feed, including links saved by older versions. Calendar web pages and failed requests now show an error instead of a successful empty sync.
+- Music context menus also match the notch's outer corner roundness and remove the native border outline.
+- Lyrics and audio-source menus follow the notch's dark appearance, accent colour and corner settings. Each lyrics mode has its placement icon, with an accent checkmark on the current choice.
+- Temporary notifications appear below the notch in the outside lyrics area, briefly replacing outside lyrics until the notification disappears.
+- Non-browser players now default to Automatic lyric searches. The per-player setting is labelled Lyric search mode without including the player's name. Saved Manual and Never preferences are respected; browsers still require an explicit search.
+- Lyrics searches retry unsuccessful lookups up to the configured retry count, stopping when lyrics or an instrumental result is found. Previous cached misses and missing music-catalog matches no longer block the current song's search.
+
 ## [1.0.4] - 2026-11-03
 
 ### Added

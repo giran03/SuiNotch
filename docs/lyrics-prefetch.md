@@ -9,7 +9,7 @@ For the song playing, SuiNotch tries, in order:
    - Synced lyrics show at once.
    - A song with nothing found is remembered for three days, because LRCLIB adds missing songs in the background.
    - An instrumental is remembered for good.
-   - Automatic lookups believe a remembered miss; Search lyrics anyway and Search again do not.
+   - A previous miss does not block a fresh search for the current song. Lookups ahead still skip cached misses to conserve their budget.
 3. **LRCLIB**, under the player's names. The exact match (`/api/get`, by name and length) and the search are asked side by side.
    - Synced lyrics win.
    - An exact match marked instrumental shows "Instrumental".
@@ -17,7 +17,7 @@ For the song playing, SuiNotch tries, in order:
 4. **Native-script names** from Apple's store, only when the first try found nothing synced.
 5. **NetEase**, with Fall back to other services.
 
-A search round that finds nothing because every service answered "no such song" ends at once. Rounds are repeated (Keep searching for, 5 by default) only when a service failed to answer: a timeout, an error, or a 429/503. The wait doubles each round (1, 2, 4, 8 s) plus jitter. A service's `Retry-After` is honoured, and every request has an 8-second timeout. Requests to one service are spaced at least 250 ms (LRCLIB) or 150 ms (others) apart. The User-Agent names the app, its version and its homepage, as LRCLIB asks.
+A song's first search repeats unsuccessful rounds up to Keep searching for (5 retries by default, or 6 total rounds), including when services answer "no such song". It stops as soon as lyrics or an instrumental result is found. Zero retries means one round. Search again advances to an alternative match in a single round. The wait doubles each retry (1, 2, 4, 8 s) plus jitter. A service's `Retry-After` is honoured, and every request has an 8-second timeout. Requests to one service are spaced at least 250 ms (LRCLIB) or 150 ms (others) apart. Changing track, pausing, turning lyrics Off or changing source permissions cancels pending automatic work. The User-Agent names the app, its version and its homepage, as LRCLIB asks.
 
 When the network comes back, a track whose automatic lookup found nothing is tried once more.
 
@@ -62,7 +62,11 @@ Settings > About > Diagnostics shows:
 ```powershell
 cargo test --locked --offline
 $env:APPDATA = Join-Path (Get-Location) 'target/lyrics-toggle-test'
-cargo test --locked --offline -- --ignored --test-threads=1 known_songs_resolve notch::lyrics_test
+cargo test --locked --offline known_songs_resolve -- --ignored --test-threads=1
+cargo test --locked --offline lyrics_button_cycles -- --ignored --test-threads=1
 ```
 
-The ignored check stores a song and a miss in a disposable cache. It confirms both resolve at once, without the two-second wait and without a single request. No test contacts a lyrics service.
+The ignored check stores songs and a miss in a disposable cache. It confirms cached lyrics resolve at once without a request, while a cached miss proceeds to the network wait and respects cancellation. No test contacts a lyrics service.
+
+Run native graphics checks in separate test processes, as above. Combining several
+window/graphics fixtures into one test process can stall after the first fixture.

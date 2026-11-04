@@ -568,7 +568,7 @@ fn act(app: &mut App, a: Act) {
                 crate::feed::set_url(url);
             }
             None => {
-                app.calendar_error = "Copy the calendar's iCal link first, then press Paste".into();
+                app.calendar_error = "Copy an iCal link or a Google embed link for one public calendar, then press Paste".into();
                 if let Some(s) = &app.settings {
                     invalidate(s);
                 }

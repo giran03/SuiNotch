@@ -4,6 +4,33 @@ use crate::lyric_style::LyricsMode;
 
 #[test]
 #[ignore = "native graphics; requires isolated APPDATA ending in lyrics-toggle-test"]
+fn adaptive_volume_slider_renders_in_both_orientations() {
+    let app = tasks::integration::fixture();
+    let output = crate::config::data_dir();
+    std::fs::create_dir_all(&output).unwrap();
+    for scale in [1.0, 1.5, 2.0] {
+        for (name, lyrics, room) in [("horizontal", false, 150.0), ("lyrics-open", true, 150.0), ("compact", false, 80.0)] {
+            let (width, height) = ((200.0 * scale) as i32, (120.0 * scale) as i32);
+            render::dc_snapshot(&app.gfx, &output.join(format!("volume-{name}-{scale}.png")), width, height, |dc| {
+                let rt = gfx::dc_render_target(&app.gfx).unwrap();
+                unsafe {
+                    rt.BindDC(dc, &RECT { left: 0, top: 0, right: width, bottom: height }).unwrap();
+                    rt.SetDpi(96.0 * scale, 96.0 * scale);
+                    rt.BeginDraw();
+                }
+                let mut cv = Canvas::new(&app.gfx, rt.cast().unwrap()).unwrap();
+                cv.clear(C::BLACK);
+                crate::pages::draw_volume_flyout(&mut cv, views::volume_layout(160.0, 96.0, room, lyrics), 0.65, false, 1.0);
+                cv.glyph(gfx::icon::VOLUME, 160.0, 96.0, 12.0, views::DIM);
+                unsafe { rt.EndDraw(None, None).unwrap(); }
+            }).unwrap();
+        }
+    }
+    unsafe { DestroyWindow(app.notch.hwnd).unwrap(); }
+}
+
+#[test]
+#[ignore = "native graphics; requires isolated APPDATA ending in lyrics-toggle-test"]
 fn lyrics_button_cycles_outside_inside_both_off_and_renders_both_together() {
     assert!(crate::config::data_dir().parent().unwrap().ends_with("lyrics-toggle-test"));
     let mut app = tasks::integration::fixture();
@@ -46,12 +73,41 @@ fn lyrics_button_cycles_outside_inside_both_off_and_renders_both_together() {
             app.notch.expanded = true;
         }
     }
+    // Notices use the outside slot in every lyrics mode, and the surface includes the whole pill.
+    for (name, mode) in [("outside", LyricsMode::Outside), ("inside", LyricsMode::Inside), ("both", LyricsMode::Both), ("off", LyricsMode::Off)] {
+        views::select_lyrics_mode(&mut app, mode);
+        debug::notification(&mut app);
+        for expanded in [false, true] {
+            app.notch.expanded = expanded;
+            for scale in [1.0, 1.5, 2.0] {
+                render::lyrics_snapshot(&mut app, &output.join(format!("notice-{name}-{expanded}-{scale}.png")), scale).unwrap();
+                let (width, height) = views::notice_size(&app).unwrap();
+                assert!(app.notch.win.0 >= width);
+                assert!(app.notch.win.1 >= app.notch.body().bottom() + 8.0 + height);
+                assert_eq!(app.lyrics, expected.0, "notices retain lyrics for restoration");
+            }
+        }
+        app.notch.notice.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(2);
+        render::expire_transients(&mut app);
+        assert!(app.notch.notice.is_none());
+    }
     // Off -> Outside restores the same result without a replacement request.
     views::click(&mut app, Hit::LyricsToggle, (false, false));
     assert_eq!(app.cfg.lyrics_mode(), LyricsMode::Outside);
     assert_eq!((app.lyrics.clone(), app.lyrics_translation.clone(), app.lyrics_romaji.clone(), app.lyrics_words.clone(), app.lyrics_source, app.lyrics_key), expected);
     assert!(!app.lyric_request.searching);
     browser_manual_result_survives_toggles(&mut app);
+    // Menu choices jump directly to any mode through the same persistence and loaded-result path.
+    loaded_result(&mut app, true);
+    let retained = app.lyrics.clone();
+    for mode in [LyricsMode::Both, LyricsMode::Outside, LyricsMode::Off, LyricsMode::Inside] {
+        views::select_lyrics_mode(&mut app, mode);
+        assert_eq!(app.cfg.lyrics_mode(), mode);
+        assert_eq!(crate::config::load_json::<Config>("config.json").lyrics_mode(), mode);
+        assert!(!app.lyric_request.searching, "choosing a mode cannot restart a browser search");
+        assert_eq!(app.lyrics, retained, "direct choices retain the loaded lyrics");
+    }
+    views::select_lyrics_mode(&mut app, LyricsMode::Outside);
     lyric_filter_cancels_source_changes_and_rejects_queued_results(&mut app);
     unsafe { DestroyWindow(app.notch.hwnd).unwrap(); }
 }

@@ -34,7 +34,6 @@ pub fn describe(outcome: &Outcome) -> String {
         Outcome::Instrumental => "Instrumental".to_string(),
         Outcome::NotFound if crate::lyrics_net::any_failed() => "Nothing found (a service did not answer)".to_string(),
         Outcome::NotFound => "Nothing found".to_string(),
-        Outcome::NotSong(why) => format!("Skipped: {why}"),
     }
 }
 
@@ -87,7 +86,6 @@ mod tests {
     #[test]
     fn outcomes_read_naturally() {
         assert_eq!(describe(&Outcome::Instrumental), "Instrumental");
-        assert_eq!(describe(&Outcome::NotSong("Looks like a video")), "Skipped: Looks like a video");
         let f = crate::lyrics::Found { lines: Vec::new(), source: crate::lyrics::Source::Lrclib, synced: true, translation: Vec::new(), romaji: Vec::new(), words: Vec::new(), id: String::new() };
         assert_eq!(describe(&Outcome::Found(f)), "LRCLIB · synced");
     }

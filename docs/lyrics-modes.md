@@ -1,5 +1,16 @@
 # Lyrics button modes
 
+Right-click the lyrics icon for a menu of all four modes, with the current mode checked.
+Right-click the audio source switcher to choose an open player directly; multiple
+sessions from the same player are numbered. A player that closes while its menu is
+open is ignored if selected. Left-click keeps its usual cycling behavior. The notch
+stays open while a menu is in use, and dismissing the menu makes no changes.
+Both menus use the notch's dark appearance, current accent colour and corner settings.
+Each lyrics mode has the same placement icon as the notch button; the current option
+has an accent-coloured checkmark. Colours are read from the current settings when drawn.
+The popup's outer corners follow Appearance roundness (square for the Flat notch style),
+and the native window border is removed.
+
 The lyrics icon on the Music page cycles through:
 
 1. **Outside:** show the current lyric in the floating display below the closed notch.

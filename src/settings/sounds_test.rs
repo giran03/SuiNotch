@@ -210,7 +210,8 @@ fn lyric_source_preferences_render_and_persist() {
     let s = app.settings.as_mut().unwrap();
     let row = s.hits.iter().find(|(_, a)| *a == Act::LyricsSource).unwrap().0;
     s.scroll.snap((row.y - 180.0).max(0.0));
-    for (name, policy) in [("never", crate::lyric_filter::Policy::Never), ("automatic", crate::lyric_filter::Policy::Automatic), ("manual", crate::lyric_filter::Policy::Manual)] {
+    assert_eq!(crate::lyric_filter::policy(&app.cfg, &app.media.as_ref().unwrap().info), crate::lyric_filter::Policy::Automatic);
+    for (name, policy) in [("manual", crate::lyric_filter::Policy::Manual), ("never", crate::lyric_filter::Policy::Never), ("automatic", crate::lyric_filter::Policy::Automatic)] {
         super::super::act(&mut app, Act::LyricsSource);
         assert_eq!(app.cfg.lyrics_sources.get("mpv.exe"), Some(&policy));
         let saved: Config = config::load_json("config.json");

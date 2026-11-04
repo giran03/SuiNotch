@@ -191,16 +191,25 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
             cv.pop();
         }
     }
-    if let Some((text, since)) = app.notch.notice.clone() {
-        let a = (1.0 - (since.elapsed().as_secs_f32() - 1.1).max(0.0) / 0.4).clamp(0.0, 1.0);
-        let w = app.gfx.text_width(&text, 12.0, 600) + 28.0;
-        let r = R::centered(body.cx(), body.bottom() - 18.0, w, 24.0);
-        cv.fill_rrect(r, 12.0, accent(app).a(a));
-        cv.text(&text, r, 12.0, 600, readable_on(accent(app)).a(a), Align::Center);
-    }
     draw_tooltip(cv, app, body);
     cv.pop();
-    draw_pill(cv, app, body);
+    // Notices temporarily take the outside lyric slot, independent of lyric visibility.
+    if let Some((text, since)) = app.notch.notice.as_ref() {
+        let a = (1.0 - (since.elapsed().as_secs_f32() - 1.1).max(0.0) / 0.4).clamp(0.0, 1.0);
+        let (w, h) = notice_size(app).unwrap();
+        let r = R::new(body.cx() - w / 2.0, body.bottom() + 8.0, w, h);
+        cv.fill_rrect(r, 12.0, accent(app).a(a));
+        cv.text(text, r, 12.0, 600, readable_on(accent(app)).a(a), Align::Center);
+    } else {
+        draw_pill(cv, app, body);
+    }
+}
+
+/// The outside notice must fit the layered window even with lyrics Off or inside-only.
+pub(crate) fn notice_size(app: &App) -> Option<(f32, f32)> {
+    app.notch.notice.as_ref().map(|(text, _)| {
+        ((app.gfx.text_width(text, 12.0, 600) + 28.0).min(crate::lyric_style::MAX_LINE_W), 24.0)
+    })
 }
 
 /// The hint for the button under the pointer, fading in just above it and sliding between buttons.
@@ -579,8 +588,34 @@ pub fn seek_bar_rect(app: &App) -> Option<R> {
 }
 
 pub fn volume_bar_rect(app: &App) -> Option<R> {
-    // Vertical track inside the flyout's hit area, centred, with room for the knob at each end.
-    app.notch.hits.iter().find(|(_, h)| *h == Hit::VolumeBar).map(|(r, _)| R::new(r.cx() - 2.5, r.y + 10.0, 5.0, r.h - 30.0))
+    app.notch.hits.iter().rev().find(|(_, h)| *h == Hit::VolumeBar).map(|(r, _)| volume_track(*r))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeLayout {
+    pub hit: R,
+    pub pill: R,
+    pub track: R,
+}
+
+/// Fit beside the volume icon only when it clears the transport controls; otherwise open upward.
+pub(crate) fn volume_layout(x: f32, cy: f32, available: f32, lyrics_open: bool) -> VolumeLayout {
+    let (hit, pill) = if !lyrics_open && available >= 132.0 {
+        (R::new(x - 126.0, cy - 14.0, 126.0, 28.0), R::new(x - 126.0, cy - 14.0, 108.0, 28.0))
+    } else {
+        (R::new(x - 14.0, cy - 86.0, 28.0, 82.0), R::new(x - 14.0, cy - 86.0, 28.0, 72.0))
+    };
+    VolumeLayout { hit, pill, track: volume_track(hit) }
+}
+
+fn volume_track(hit: R) -> R {
+    if hit.w > hit.h { R::new(hit.x + 12.0, hit.cy() - 2.5, hit.w - 42.0, 5.0) }
+    else { R::new(hit.cx() - 2.5, hit.y + 10.0, 5.0, hit.h - 30.0) }
+}
+
+pub(crate) fn volume_fraction(track: R, x: f32, y: f32) -> f32 {
+    if track.w > track.h { ((x - track.x) / track.w).clamp(0.0, 1.0) }
+    else { (1.0 - (y - track.y) / track.h).clamp(0.0, 1.0) }
 }
 
 pub fn todo_overflow(app: &App) -> f32 {
@@ -607,6 +642,23 @@ pub fn clip_overflow(app: &App) -> f32 {
 }
 
 // ------------------------------------------------------------------ clicks
+
+/// Direct selection and the quick cycle share persistence and loaded-lyrics behavior.
+pub fn select_lyrics_mode(app: &mut App, mode: crate::lyric_style::LyricsMode) {
+    use crate::lyric_style::LyricsMode;
+    let mut cfg = app.cfg.clone();
+    cfg.lyrics_pill = mode != LyricsMode::Off;
+    match mode {
+        LyricsMode::Outside => cfg.lyrics_place = 0,
+        LyricsMode::Inside => cfg.lyrics_place = 1,
+        LyricsMode::Both => cfg.lyrics_place = 2,
+        LyricsMode::Off => {}
+    }
+    app.notch.lyrics_view = matches!(mode, LyricsMode::Inside | LyricsMode::Both);
+    app.notch.recent_view &= !app.notch.lyrics_view;
+    app.set_config(cfg);
+    crate::settings::refresh(app);
+}
 
 pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
     let now = store::now();
@@ -642,10 +694,7 @@ pub fn click(app: &mut App, h: Hit, (ctrl, shift): (bool, bool)) {
         Hit::LyricsToggle => {
             let mut cfg = app.cfg.clone();
             let mode = cfg.cycle_lyrics_mode();
-            app.notch.lyrics_view = matches!(mode, crate::lyric_style::LyricsMode::Inside | crate::lyric_style::LyricsMode::Both);
-            app.notch.recent_view &= !app.notch.lyrics_view;
-            app.set_config(cfg);
-            crate::settings::refresh(app);
+            select_lyrics_mode(app, mode);
         }
         Hit::LyricsAlt => {
             // Steps through off, romaji and translation, skipping what this song doesn't have.
@@ -1009,4 +1058,35 @@ fn quick_due(k: u8, now: i64) -> Option<i64> {
         }
         _ => store::at_local(today.succ_opt().unwrap_or(today), 9, 0),
     })
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn volume_orientation_respects_lyrics_and_available_control_space() {
+        for (room, lyrics, horizontal) in [(150.0, false, true), (132.0, false, true), (131.0, false, false), (500.0, true, false)] {
+            let layout = volume_layout(400.0, 140.0, room, lyrics);
+            assert_eq!(layout.track.w > layout.track.h, horizontal);
+            assert_eq!(volume_track(layout.hit), layout.track, "input and drawing use the same track");
+            assert!(layout.pill.contains(layout.track.x, layout.track.y));
+            assert!(layout.pill.contains(layout.track.right(), layout.track.bottom()));
+            if horizontal {
+                assert!(layout.hit.x >= 400.0 - room + 6.0, "keep a gap after the transport controls");
+            }
+        }
+    }
+
+    #[test]
+    fn volume_drag_maps_the_correct_axis_and_clamps_at_both_ends() {
+        let horizontal = volume_layout(400.0, 140.0, 150.0, false).track;
+        assert_eq!(volume_fraction(horizontal, horizontal.x - 50.0, 0.0), 0.0);
+        assert_eq!(volume_fraction(horizontal, horizontal.cx(), 999.0), 0.5);
+        assert_eq!(volume_fraction(horizontal, horizontal.right() + 50.0, 0.0), 1.0);
+        let vertical = volume_layout(400.0, 140.0, 150.0, true).track;
+        assert_eq!(volume_fraction(vertical, 0.0, vertical.y - 50.0), 1.0);
+        assert_eq!(volume_fraction(vertical, 999.0, vertical.cy()), 0.5);
+        assert_eq!(volume_fraction(vertical, 0.0, vertical.bottom() + 50.0), 0.0);
+    }
 }

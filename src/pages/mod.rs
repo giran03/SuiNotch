@@ -144,7 +144,8 @@ pub fn music(cv: &mut Canvas, app: &mut App, area: R) {
     if info.sources > 1 {
         source_toggle(cv, app, x0 + 64.0, cy, info.sources);
     }
-    volume_control(cv, app, x0 + info_w - 10.0, cy);
+    let volume_x = x0 + info_w - 10.0;
+    volume_control(cv, app, volume_x, cy, volume_x - (cx + TRANSPORT_HALF));
 
     let panel = R::new(area.right() - 252.0, area.y - 6.0, 252.0, area.h + 8.0);
     if lyrics_view {
@@ -201,31 +202,35 @@ fn source_toggle(cv: &Canvas, app: &mut App, cx: f32, cy: f32, sources: usize) {
     cv.text(&sources.min(9).to_string(), badge, 9.0, 700, C::WHITE.a(0.8), Align::Center);
 }
 
-fn volume_control(cv: &mut Canvas, app: &mut App, x: f32, cy: f32) {
+fn volume_control(cv: &mut Canvas, app: &mut App, x: f32, cy: f32, available: f32) {
     let Some(audio) = app.audio.as_ref() else { return };
     let (level, muted) = audio.get();
     let open = app.notch.volume_open.value.clamp(0.0, 1.0);
     if open > 0.02 {
-        // A vertical flyout above the icon, so it never slides over the transport buttons.
-        // The hit area runs down to the icon so hover carries over; `volume_bar_rect` derives the track from it.
-        let hit_r = R::new(x - 14.0, cy - 86.0, 28.0, 82.0);
-        hit(app, hit_r, Hit::VolumeBar);
-        let pill = R::new(hit_r.x, hit_r.y, hit_r.w, 72.0);
-        let track = views::volume_bar_rect(app).unwrap_or(pill);
-        let frac = if muted { 0.0 } else { level.clamp(0.0, 1.0) };
-        let knob_y = track.bottom() - track.h * frac;
-        cv.push_opacity(open);
-        cv.fill_rrect(pill, 14.0, C::BLACK);
-        cv.fill_rrect(pill, 14.0, C::WHITE.a(0.10));
-        cv.fill_rrect(track, track.w / 2.0, C::WHITE.a(0.16));
-        if frac > 0.0 {
-            cv.fill_rrect(R::new(track.x, knob_y, track.w, track.bottom() - knob_y), track.w / 2.0, C::WHITE);
-        }
-        cv.fill_circle(track.cx(), knob_y, 5.0, C::WHITE);
-        cv.pop();
+        let layout = views::volume_layout(x, cy, available, app.notch.lyrics_view);
+        hit(app, layout.hit, Hit::VolumeBar);
+        draw_volume_flyout(cv, layout, level, muted, open);
     }
     let g = if muted || level <= 0.001 { icon::MUTE } else { icon::VOLUME };
     icon_button(cv, app, x, cy, 12.0, g, Hit::Volume, DIM);
+}
+
+pub(crate) fn draw_volume_flyout(cv: &mut Canvas, layout: views::VolumeLayout, level: f32, muted: bool, open: f32) {
+    let (pill, track) = (layout.pill, layout.track);
+    let frac = if muted { 0.0 } else { level.clamp(0.0, 1.0) };
+    let horizontal = track.w > track.h;
+    let (knob_x, knob_y) = if horizontal { (track.x + track.w * frac, track.cy()) } else { (track.cx(), track.bottom() - track.h * frac) };
+    let radius = track.w.min(track.h) / 2.0;
+    cv.push_opacity(open);
+    cv.fill_rrect(pill, 14.0, C::BLACK);
+    cv.fill_rrect(pill, 14.0, C::WHITE.a(0.10));
+    cv.fill_rrect(track, radius, C::WHITE.a(0.16));
+    if frac > 0.0 {
+        let fill = if horizontal { R::new(track.x, track.y, track.w * frac, track.h) } else { R::new(track.x, knob_y, track.w, track.bottom() - knob_y) };
+        cv.fill_rrect(fill, radius, C::WHITE);
+    }
+    cv.fill_circle(knob_x, knob_y, 5.0, C::WHITE);
+    cv.pop();
 }
 
 fn lyrics_panel(cv: &mut Canvas, app: &mut App, r: R, tint: C) {
