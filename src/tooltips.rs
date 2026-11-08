@@ -6,13 +6,14 @@ use crate::notch::Hit;
 use crate::lyric_style::LyricsMode;
 
 /// The state a hint's wording depends on.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Context {
     pub lyrics_mode: LyricsMode,
     pub recent_view: bool,
     /// What the lyrics panel shows under each line: 0 nothing, 1 romaji, 2 translation.
     pub panel_alt: usize,
     pub muted: bool,
+    pub audio_target: Option<String>,
     /// The lyrics on show are kept for their song.
     pub lyrics_kept: bool,
 }
@@ -24,6 +25,7 @@ impl Context {
             recent_view: app.notch.recent_view,
             panel_alt: app.cfg.lyrics_panel_alt,
             muted: app.audio.as_ref().is_some_and(|a| a.get().1),
+            audio_target: app.audio.as_ref().filter(|a| !a.is_master()).map(|a| a.target_name()),
             lyrics_kept: app.lyric_request.pinned,
         }
     }
@@ -39,6 +41,7 @@ pub fn describe(hit: Hit, ctx: &Context) -> Option<String> {
         Hit::PageDot(page) => page.label(),
         Hit::Source => "Switch to the next player",
         Hit::LyricsToggle => match ctx.lyrics_mode {
+            LyricsMode::Auto => "Lyrics auto; click to show outside",
             LyricsMode::Off => "Lyrics off; click to show outside",
             LyricsMode::Outside => "Lyrics outside; click to show inside",
             LyricsMode::Inside => "Lyrics inside; click to show both",
@@ -79,6 +82,13 @@ pub fn describe(hit: Hit, ctx: &Context) -> Option<String> {
     Some(match hit {
         Hit::LyricsToggle => format!("{text}; right-click for all modes"),
         Hit::Source => format!("{text}; right-click to choose a player"),
+        Hit::Volume => {
+            if let Some(target) = &ctx.audio_target {
+                format!("{text} ({target}); right-click to choose audio source")
+            } else {
+                format!("{text}; right-click to choose audio source")
+            }
+        }
         _ => text.to_string(),
     })
 }
@@ -106,8 +116,12 @@ mod tests {
         assert_eq!(describe(Hit::LyricsToggle, &off).as_deref(), Some("Lyrics off; click to show outside; right-click for all modes"));
         let outside = Context { lyrics_mode: LyricsMode::Outside, ..Context::default() };
         assert_eq!(describe(Hit::LyricsToggle, &outside).as_deref(), Some("Lyrics outside; click to show inside; right-click for all modes"));
-        assert_eq!(describe(Hit::Volume, &on).as_deref(), Some("Unmute"));
-        assert_eq!(describe(Hit::Volume, &off).as_deref(), Some("Mute"));
+        let auto = Context { lyrics_mode: LyricsMode::Auto, ..Context::default() };
+        assert_eq!(describe(Hit::LyricsToggle, &auto).as_deref(), Some("Lyrics auto; click to show outside; right-click for all modes"));
+        assert_eq!(describe(Hit::Volume, &on).as_deref(), Some("Unmute; right-click to choose audio source"));
+        assert_eq!(describe(Hit::Volume, &off).as_deref(), Some("Mute; right-click to choose audio source"));
+        let custom = Context { audio_target: Some("Spotify".into()), ..Context::default() };
+        assert_eq!(describe(Hit::Volume, &custom).as_deref(), Some("Mute (Spotify); right-click to choose audio source"));
     }
 
     #[test]

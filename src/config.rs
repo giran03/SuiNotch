@@ -85,6 +85,12 @@ pub struct Config {
     /// Which preset the choices below add up to (`lyric_style::PRESET_LABELS`); worked out on load, never written.
     #[serde(skip)]
     pub lyrics_preset: usize,
+    /// Last preset explicitly chosen in settings or applied via Auto lyrics mode.
+    #[serde(default)]
+    pub lyrics_selected_preset: usize,
+    /// Whether lyrics selection is currently tracking the preset on the settings in Auto mode.
+    #[serde(default)]
+    pub lyrics_auto_mode: bool,
     // How the current line looks while the notch is closed; each is an index into the labels in `lyric_style`.
     pub lyrics_place: usize,
     pub lyrics_backdrop: usize,
@@ -197,6 +203,8 @@ impl Default for Config {
             lyrics_retries: 5,
             lyrics_style: None,
             lyrics_preset: 0,
+            lyrics_selected_preset: 0,
+            lyrics_auto_mode: false,
             lyrics_place: 0,
             lyrics_backdrop: 0,
             lyrics_highlight: 0,

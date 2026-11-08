@@ -20,7 +20,7 @@ fn adaptive_volume_slider_renders_in_both_orientations() {
                 }
                 let mut cv = Canvas::new(&app.gfx, rt.cast().unwrap()).unwrap();
                 cv.clear(C::BLACK);
-                crate::pages::draw_volume_flyout(&mut cv, views::volume_layout(160.0, 96.0, room, lyrics), 0.65, false, 1.0);
+                crate::pages::draw_volume_flyout(&mut cv, views::volume_layout(160.0, 96.0, room, lyrics), 0.65, false, 1.0, false, C::WHITE);
                 cv.glyph(gfx::icon::VOLUME, 160.0, 96.0, 12.0, views::DIM);
                 unsafe { rt.EndDraw(None, None).unwrap(); }
             }).unwrap();
@@ -100,7 +100,7 @@ fn lyrics_button_cycles_outside_inside_both_off_and_renders_both_together() {
     // Menu choices jump directly to any mode through the same persistence and loaded-result path.
     loaded_result(&mut app, true);
     let retained = app.lyrics.clone();
-    for mode in [LyricsMode::Both, LyricsMode::Outside, LyricsMode::Off, LyricsMode::Inside] {
+    for mode in [LyricsMode::Both, LyricsMode::Outside, LyricsMode::Off, LyricsMode::Inside, LyricsMode::Auto] {
         views::select_lyrics_mode(&mut app, mode);
         assert_eq!(app.cfg.lyrics_mode(), mode);
         assert_eq!(crate::config::load_json::<Config>("config.json").lyrics_mode(), mode);

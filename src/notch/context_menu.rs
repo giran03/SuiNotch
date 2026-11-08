@@ -12,6 +12,7 @@ use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId}
 struct Row {
     label: String,
     mode: Option<LyricsMode>,
+    icon: Option<char>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,6 +131,8 @@ fn paint_row(cv: &Canvas, app: &App, row: &Row, area: R, selected: bool, checked
     let icon_color = if checked && !disabled { accent } else { ink };
     if let Some(mode) = row.mode {
         views::lyrics_mode_glyph(cv, 22.0, area.cy(), 13.0, icon_color, mode);
+    } else if let Some(icon) = row.icon {
+        cv.glyph(icon, 22.0, area.cy(), 13.0, icon_color);
     } else {
         cv.glyph(gfx::icon::MUSIC, 22.0, area.cy(), 13.0, icon_color);
     }
@@ -165,7 +168,8 @@ pub(super) fn draw(app: &App, lparam: LPARAM) -> bool {
     })
 }
 
-const MODES: [(LyricsMode, &str); 4] = [
+const MODES: [(LyricsMode, &str); 5] = [
+    (LyricsMode::Auto, "Auto"),
     (LyricsMode::Outside, "Outside"),
     (LyricsMode::Inside, "Inside"),
     (LyricsMode::Both, "Both"),
@@ -181,10 +185,11 @@ pub(super) fn open(app: &mut App, lparam: LPARAM) {
     let mut client = screen;
     unsafe { let _ = ScreenToClient(app.notch.hwnd, &mut client); }
     let hit = app.notch.hit_at(client.x as f32 / app.notch.scale, client.y as f32 / app.notch.scale - app.notch.gap.value);
-    if let Some(hit @ (Hit::LyricsToggle | Hit::Source)) = hit {
+    if let Some(hit @ (Hit::LyricsToggle | Hit::Source | Hit::Volume | Hit::VolumeBar)) = hit {
+        let menu_hit = if hit == Hit::VolumeBar { Hit::Volume } else { hit };
         app.notch.menu_open = true;
         app.notch.pressed = None;
-        app::defer(Deferred::MusicMenu(hit, screen));
+        app::defer(Deferred::MusicMenu(menu_hit, screen));
     }
 }
 
@@ -206,7 +211,14 @@ pub(super) fn lyrics_menu(current: LyricsMode) -> Result<HMENU> {
 pub(crate) fn show(hit: Hit, point: POINT) {
     let Some((hwnd, mode)) = app::with(|app| (app.notch.hwnd, app.cfg.lyrics_mode())) else { return };
     let sources = if hit == Hit::Source { crate::media::source_choices() } else { Vec::new() };
-    let menu = if hit == Hit::LyricsToggle { lyrics_menu(mode) } else {
+    let vol_sources = if hit == Hit::Volume {
+        app::with(|app| app.audio.as_ref().map(|a| a.source_choices())).flatten().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let menu = if hit == Hit::LyricsToggle {
+        lyrics_menu(mode)
+    } else if hit == Hit::Source {
         unsafe { CreatePopupMenu() }.inspect(|&menu| {
             for (index, choice) in sources.iter().enumerate() {
                 append(menu, index + 1, &choice.label, choice.selected);
@@ -215,14 +227,31 @@ pub(crate) fn show(hit: Hit, point: POINT) {
                 unsafe { let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No audio sources available")); }
             }
         })
+    } else {
+        unsafe { CreatePopupMenu() }.inspect(|&menu| {
+            for (index, choice) in vol_sources.iter().enumerate() {
+                append(menu, index + 1, &choice.label, choice.selected);
+            }
+            if vol_sources.is_empty() {
+                unsafe { let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("No audio outputs or apps available")); }
+            }
+        })
     };
     if let Ok(menu) = menu {
         let rows = if hit == Hit::LyricsToggle {
-            MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode) }).collect()
-        } else if sources.is_empty() {
-            vec![Row { label: "No audio sources available".into(), mode: None }]
+            MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode), icon: None }).collect()
+        } else if hit == Hit::Source {
+            if sources.is_empty() {
+                vec![Row { label: "No audio sources available".into(), mode: None, icon: Some(gfx::icon::MUSIC) }]
+            } else {
+                sources.iter().map(|choice| Row { label: choice.label.clone(), mode: None, icon: Some(gfx::icon::MUSIC) }).collect()
+            }
         } else {
-            sources.iter().map(|choice| Row { label: choice.label.clone(), mode: None }).collect()
+            if vol_sources.is_empty() {
+                vec![Row { label: "No audio outputs or apps available".into(), mode: None, icon: Some(gfx::icon::VOLUME) }]
+            } else {
+                vol_sources.iter().map(|choice| Row { label: choice.label.clone(), mode: None, icon: Some(choice.icon) }).collect()
+            }
         };
         let brush = app::with(|app| theme(menu, rows, app)).unwrap_or_default();
         // Scope the hook to this thread/process and only this popup's modal lifetime.
@@ -241,8 +270,18 @@ pub(crate) fn show(hit: Hit, point: POINT) {
                 if let Some((mode, _)) = MODES.get(chosen - 1) {
                     app::with(|app| views::select_lyrics_mode(app, *mode));
                 }
-            } else if let Some(choice) = sources.into_iter().nth(chosen - 1) {
-                crate::media::select_source(choice);
+            } else if hit == Hit::Source {
+                if let Some(choice) = sources.into_iter().nth(chosen - 1) {
+                    crate::media::select_source(choice);
+                }
+            } else if hit == Hit::Volume {
+                if let Some(choice) = vol_sources.into_iter().nth(chosen - 1) {
+                    app::with(|app| {
+                        if let Some(a) = app.audio.as_mut() {
+                            a.select_target(choice.id);
+                        }
+                    });
+                }
             }
         }
     }
@@ -296,7 +335,7 @@ mod tests {
         for scale in [1.0, 1.5, 2.0] {
             app.notch.scale = scale;
             let menu = lyrics_menu(LyricsMode::Inside).unwrap();
-            let rows = MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode) }).collect();
+            let rows = MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode), icon: None }).collect();
             let brush = theme(menu, rows, &app);
             let mut size = MEASUREITEMSTRUCT { CtlType: ODT_MENU, itemData: 1, ..Default::default() };
             assert!(measure(&app, LPARAM(&mut size as *mut _ as isize)));
@@ -332,7 +371,7 @@ mod tests {
         for (current, _) in MODES {
             let menu = lyrics_menu(current).unwrap();
             unsafe {
-                assert_eq!(GetMenuItemCount(Some(menu)), 4);
+                assert_eq!(GetMenuItemCount(Some(menu)), MODES.len() as i32);
                 for (index, (mode, _)) in MODES.iter().enumerate() {
                     assert_eq!(GetMenuItemID(menu, index as i32), index as u32 + 1);
                     let state = GetMenuState(menu, index as u32, MF_BYPOSITION);

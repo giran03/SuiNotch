@@ -26,10 +26,32 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::events::{self, post, Event, WM_APP_CAPS, WM_APP_FOREGROUND, WM_APP_LANG};
 
+use windows_core::Interface;
+
 // ---------------------------------------------------------------- volume
 
 /// Volume changes we make ourselves carry this context so they don't pop the HUD.
-pub const OWN_VOLUME_CONTEXT: GUID = GUID::from_u128(0x5e1d_0c7a_9b3f_4c2e_a1d4_53554e4f5443);
+pub const OWN_VOLUME_CONTEXT: GUID = GUID::from_u128(0x5e1d_0c7a_9b3f_4c2e_a1d4_5355_4e4f_5443);
+
+const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+    pid: 14,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VolumeTargetId {
+    Master,
+    Device(String),
+    App { pid: u32, name: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VolumeSourceChoice {
+    pub id: VolumeTargetId,
+    pub label: String,
+    pub selected: bool,
+    pub icon: char,
+}
 
 #[implement(IAudioEndpointVolumeCallback)]
 struct VolumeCallback;
@@ -69,11 +91,64 @@ impl IMMNotificationClient_Impl for DeviceCallback_Impl {
     }
 }
 
+fn device_name(dev: &IMMDevice) -> String {
+    unsafe {
+        let Ok(store) = dev.OpenPropertyStore(STGM_READ) else { return "Audio Device".into() };
+        store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME)
+            .ok()
+            .map(|v| v.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Audio Device".into())
+    }
+}
+
+fn device_icon(name: &str) -> char {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("headphone") || lower.contains("headset") || lower.contains("earphone") || lower.contains("airpod") {
+        crate::gfx::icon::HEADPHONE
+    } else if lower.contains("tv") || lower.contains("display") || lower.contains("monitor") || lower.contains("hdmi") {
+        crate::gfx::icon::DISPLAY
+    } else {
+        crate::gfx::icon::VOLUME
+    }
+}
+
+fn app_icon(name: &str) -> char {
+    if name == "System Sounds" {
+        crate::gfx::icon::BELL
+    } else {
+        crate::gfx::icon::MUSIC
+    }
+}
+
+pub fn format_app_name(raw: &str) -> String {
+    let stem = raw.strip_suffix(".exe").or_else(|| raw.strip_suffix(".EXE")).unwrap_or(raw);
+    match stem.to_ascii_lowercase().as_str() {
+        "chrome" => "Google Chrome".into(),
+        "msedge" => "Microsoft Edge".into(),
+        "firefox" => "Firefox".into(),
+        "spotify" => "Spotify".into(),
+        "discord" => "Discord".into(),
+        "wavee" => "Wavee".into(),
+        "stellars" => "Stellars".into(),
+        "steam" => "Steam".into(),
+        "vlc" => "VLC media player".into(),
+        _ => {
+            let mut chars = stem.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => raw.to_string(),
+            }
+        }
+    }
+}
+
 pub struct Audio {
     enumerator: IMMDeviceEnumerator,
     endpoint: Option<IAudioEndpointVolume>,
     volume_cb: IAudioEndpointVolumeCallback,
     _device_cb: IMMNotificationClient,
+    target: VolumeTargetId,
 }
 
 impl Audio {
@@ -82,7 +157,13 @@ impl Audio {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let device_cb: IMMNotificationClient = DeviceCallback.into();
             enumerator.RegisterEndpointNotificationCallback(&device_cb)?;
-            let mut audio = Audio { enumerator, endpoint: None, volume_cb: VolumeCallback.into(), _device_cb: device_cb };
+            let mut audio = Audio {
+                enumerator,
+                endpoint: None,
+                volume_cb: VolumeCallback.into(),
+                _device_cb: device_cb,
+                target: VolumeTargetId::Master,
+            };
             audio.rebind();
             Ok(audio)
         }
@@ -107,7 +188,102 @@ impl Audio {
         }
     }
 
+    pub fn is_master(&self) -> bool {
+        matches!(self.target, VolumeTargetId::Master)
+    }
+
+    pub fn target_name(&self) -> String {
+        match &self.target {
+            VolumeTargetId::Master => "Master".into(),
+            VolumeTargetId::Device(id) => {
+                unsafe {
+                    self.enumerator.GetDevice(&HSTRING::from(id.as_str()))
+                        .ok()
+                        .map(|d| device_name(&d))
+                        .unwrap_or_else(|| "Device".into())
+                }
+            }
+            VolumeTargetId::App { name, .. } => format_app_name(name),
+        }
+    }
+
+    pub fn select_target(&mut self, target: VolumeTargetId) {
+        self.target = target;
+    }
+
+    unsafe fn device_endpoint(&self, id: &str) -> Option<IAudioEndpointVolume> {
+        let dev = self.enumerator.GetDevice(&HSTRING::from(id)).ok()?;
+        dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
+    }
+
+    unsafe fn find_sessions(&self, target_pid: u32, target_name: &str) -> Vec<ISimpleAudioVolume> {
+        let mut matching = Vec::new();
+        let Ok(default_dev) = self.enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) else {
+            return matching;
+        };
+        let Ok(session_mgr) = default_dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
+            return matching;
+        };
+        let Ok(enum_sessions) = session_mgr.GetSessionEnumerator() else {
+            return matching;
+        };
+        let count = enum_sessions.GetCount().unwrap_or(0);
+        let is_sys_target = target_name == "System Sounds";
+
+        for i in 0..count {
+            let Ok(control) = enum_sessions.GetSession(i) else { continue };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            let Ok(state) = control.GetState() else { continue };
+            if state == AudioSessionStateExpired { continue };
+
+            let is_sys = control2.IsSystemSoundsSession() == S_OK;
+            let pid = control2.GetProcessId().unwrap_or(0);
+            let proc = process_name(pid);
+            let matched = if is_sys_target {
+                is_sys
+            } else if target_pid != 0 && pid == target_pid {
+                true
+            } else {
+                !is_sys && proc.eq_ignore_ascii_case(target_name)
+            };
+
+            if matched {
+                if let Ok(vol) = control.cast::<ISimpleAudioVolume>() {
+                    matching.push(vol);
+                }
+            }
+        }
+        matching
+    }
+
     pub fn get(&self) -> (f32, bool) {
+        unsafe {
+            match &self.target {
+                VolumeTargetId::Master => self.get_master(),
+                VolumeTargetId::Device(id) => {
+                    if let Some(ep) = self.device_endpoint(id) {
+                        let level = ep.GetMasterVolumeLevelScalar().unwrap_or(0.0);
+                        let muted = ep.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+                        (level, muted)
+                    } else {
+                        self.get_master()
+                    }
+                }
+                VolumeTargetId::App { pid, name } => {
+                    let sessions = self.find_sessions(*pid, name);
+                    if let Some(first) = sessions.first() {
+                        let level = first.GetMasterVolume().unwrap_or(1.0);
+                        let muted = first.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+                        (level, muted)
+                    } else {
+                        self.get_master()
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_master(&self) -> (f32, bool) {
         let Some(ep) = &self.endpoint else { return (0.0, true) };
         unsafe {
             let level = ep.GetMasterVolumeLevelScalar().unwrap_or(0.0);
@@ -117,9 +293,41 @@ impl Audio {
     }
 
     pub fn set(&self, level: f32) {
+        let clamped = level.clamp(0.0, 1.0);
+        unsafe {
+            match &self.target {
+                VolumeTargetId::Master => self.set_master(clamped),
+                VolumeTargetId::Device(id) => {
+                    if let Some(ep) = self.device_endpoint(id) {
+                        let _ = ep.SetMasterVolumeLevelScalar(clamped, &OWN_VOLUME_CONTEXT);
+                        if clamped > 0.0 {
+                            let _ = ep.SetMute(false, &OWN_VOLUME_CONTEXT);
+                        }
+                    } else {
+                        self.set_master(clamped);
+                    }
+                }
+                VolumeTargetId::App { pid, name } => {
+                    let sessions = self.find_sessions(*pid, name);
+                    if !sessions.is_empty() {
+                        for vol in sessions {
+                            let _ = vol.SetMasterVolume(clamped, &OWN_VOLUME_CONTEXT);
+                            if clamped > 0.0 {
+                                let _ = vol.SetMute(false, &OWN_VOLUME_CONTEXT);
+                            }
+                        }
+                    } else {
+                        self.set_master(clamped);
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_master(&self, level: f32) {
         if let Some(ep) = &self.endpoint {
             unsafe {
-                let _ = ep.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), &OWN_VOLUME_CONTEXT);
+                let _ = ep.SetMasterVolumeLevelScalar(level, &OWN_VOLUME_CONTEXT);
                 if level > 0.0 {
                     let _ = ep.SetMute(false, &OWN_VOLUME_CONTEXT);
                 }
@@ -128,12 +336,144 @@ impl Audio {
     }
 
     pub fn toggle_mute(&self) {
+        unsafe {
+            match &self.target {
+                VolumeTargetId::Master => self.toggle_mute_master(),
+                VolumeTargetId::Device(id) => {
+                    if let Some(ep) = self.device_endpoint(id) {
+                        let muted = ep.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+                        let _ = ep.SetMute(!muted, &OWN_VOLUME_CONTEXT);
+                    } else {
+                        self.toggle_mute_master();
+                    }
+                }
+                VolumeTargetId::App { pid, name } => {
+                    let sessions = self.find_sessions(*pid, name);
+                    if !sessions.is_empty() {
+                        let (_, muted) = self.get();
+                        for vol in sessions {
+                            let _ = vol.SetMute(!muted, &OWN_VOLUME_CONTEXT);
+                        }
+                    } else {
+                        self.toggle_mute_master();
+                    }
+                }
+            }
+        }
+    }
+
+    fn toggle_mute_master(&self) {
         if let Some(ep) = &self.endpoint {
-            let (_, muted) = self.get();
+            let (_, muted) = self.get_master();
             unsafe {
                 let _ = ep.SetMute(!muted, &OWN_VOLUME_CONTEXT);
             }
         }
+    }
+
+    pub fn source_choices(&self) -> Vec<VolumeSourceChoice> {
+        let mut choices = Vec::new();
+        unsafe {
+            let default_id = self.enumerator
+                .GetDefaultAudioEndpoint(eRender, eMultimedia)
+                .ok()
+                .and_then(|d| d.GetId().ok().and_then(|s| s.to_string().ok()))
+                .unwrap_or_default();
+
+            // 1. Playback devices
+            let mut dev_choices = Vec::new();
+            if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+                let dev_count = collection.GetCount().unwrap_or(0);
+                for i in 0..dev_count {
+                    let Ok(dev) = collection.Item(i) else { continue };
+                    let id = dev.GetId().ok().and_then(|s| s.to_string().ok()).unwrap_or_default();
+                    if id.is_empty() { continue };
+                    let raw_name = device_name(&dev);
+                    let is_default = id == default_id;
+                    let icon = device_icon(&raw_name);
+                    let (target_id, label, selected) = if is_default {
+                        let selected = matches!(self.target, VolumeTargetId::Master)
+                            || matches!(&self.target, VolumeTargetId::Device(dev_id) if dev_id == &id);
+                        (VolumeTargetId::Master, format!("{raw_name} (Default)"), selected)
+                    } else {
+                        let selected = matches!(&self.target, VolumeTargetId::Device(dev_id) if dev_id == &id);
+                        (VolumeTargetId::Device(id.clone()), raw_name, selected)
+                    };
+                    dev_choices.push(VolumeSourceChoice {
+                        id: target_id,
+                        label,
+                        selected,
+                        icon,
+                    });
+                }
+            }
+            dev_choices.sort_by_key(|c| if c.id == VolumeTargetId::Master { 0 } else { 1 });
+            choices.extend(dev_choices);
+
+            // 2. Applications (Audio sessions on default endpoint)
+            if let Ok(default_dev) = self.enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+                if let Ok(mgr) = default_dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                    if let Ok(enum_sessions) = mgr.GetSessionEnumerator() {
+                        let count = enum_sessions.GetCount().unwrap_or(0);
+                        let mut seen = std::collections::HashSet::new();
+
+                        for i in 0..count {
+                            let Ok(control) = enum_sessions.GetSession(i) else { continue };
+                            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+                            let Ok(state) = control.GetState() else { continue };
+                            if state == AudioSessionStateExpired { continue };
+
+                            let is_sys = control2.IsSystemSoundsSession() == S_OK;
+                            let pid = control2.GetProcessId().unwrap_or(0);
+                            let (app_id, display_label, icon) = if is_sys {
+                                (
+                                    VolumeTargetId::App { pid: 0, name: "System Sounds".into() },
+                                    "System Sounds".to_string(),
+                                    app_icon("System Sounds"),
+                                )
+                            } else {
+                                if pid == 0 { continue };
+                                let proc = process_name(pid);
+                                if proc == "unknown" || proc.is_empty() { continue };
+                                let display = control.GetDisplayName().ok().and_then(|s| s.to_string().ok()).unwrap_or_default();
+                                let clean_display = if !display.is_empty() && !display.starts_with('@') {
+                                    display
+                                } else {
+                                    format_app_name(&proc)
+                                };
+                                let icon = app_icon(&clean_display);
+                                (
+                                    VolumeTargetId::App { pid, name: proc },
+                                    clean_display,
+                                    icon,
+                                )
+                            };
+
+                            if seen.insert(display_label.clone()) {
+                                let selected = match &self.target {
+                                    VolumeTargetId::App { pid: t_pid, name: t_name } => {
+                                        match &app_id {
+                                            VolumeTargetId::App { pid: a_pid, name: a_name } => {
+                                                (*t_pid != 0 && t_pid == a_pid) || t_name.eq_ignore_ascii_case(a_name)
+                                            }
+                                            _ => false,
+                                        }
+                                    }
+                                    _ => false,
+                                };
+                                choices.push(VolumeSourceChoice {
+                                    id: app_id,
+                                    label: display_label,
+                                    selected,
+                                    icon,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        choices
     }
 }
 
@@ -784,10 +1124,55 @@ pub fn listen_for_second_launch() {
 #[cfg(test)]
 mod tests {
     use super::human_size;
+    use super::*;
 
     #[test]
     fn readable_sizes() {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2_516_582), "2.4 MB");
+    }
+
+    #[test]
+    fn app_name_formatting_and_icons() {
+        assert_eq!(format_app_name("chrome.exe"), "Google Chrome");
+        assert_eq!(format_app_name("spotify.exe"), "Spotify");
+        assert_eq!(format_app_name("discord.exe"), "Discord");
+        assert_eq!(format_app_name("stellars.exe"), "Stellars");
+        assert_eq!(format_app_name("unknown"), "Unknown");
+
+        assert_eq!(device_icon("Headphones (Realtek)"), crate::gfx::icon::HEADPHONE);
+        assert_eq!(device_icon("AirPods Pro"), crate::gfx::icon::HEADPHONE);
+        assert_eq!(device_icon("LG TV HDMI"), crate::gfx::icon::DISPLAY);
+        assert_eq!(device_icon("Speakers (High Definition)"), crate::gfx::icon::VOLUME);
+
+        assert_eq!(app_icon("System Sounds"), crate::gfx::icon::BELL);
+        assert_eq!(app_icon("Spotify"), crate::gfx::icon::MUSIC);
+    }
+
+    #[test]
+    fn volume_target_selection_and_choices() {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if let Ok(mut audio) = Audio::new() {
+            assert!(audio.is_master());
+            assert_eq!(audio.target_name(), "Master");
+
+            let choices = audio.source_choices();
+            assert!(!choices.is_empty());
+            assert!(choices[0].selected);
+            assert_eq!(choices[0].id, VolumeTargetId::Master);
+
+            if let Some(app_choice) = choices.iter().find(|c| matches!(c.id, VolumeTargetId::App { .. })) {
+                audio.select_target(app_choice.id.clone());
+                assert!(!audio.is_master());
+                assert_eq!(audio.target_name(), app_choice.label);
+
+                let updated_choices = audio.source_choices();
+                assert!(!updated_choices[0].selected);
+                assert!(updated_choices.iter().find(|c| c.id == app_choice.id).unwrap().selected);
+            }
+
+            audio.select_target(VolumeTargetId::Master);
+            assert!(audio.is_master());
+        }
     }
 }

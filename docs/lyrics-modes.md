@@ -1,6 +1,7 @@
 # Lyrics button modes
 
-Right-click the lyrics icon for a menu of all four modes, with the current mode checked.
+Right-click the lyrics icon for a menu of all modes (Auto, Outside, Inside, Both, Off), with the current mode checked.
+Choosing **Auto** applies the current selected lyric preset configured in Settings (e.g. Pill, In the notch, Text only, Karaoke, Glow, or Custom).
 Right-click the audio source switcher to choose an open player directly; multiple
 sessions from the same player are numbered. A player that closes while its menu is
 open is ignored if selected. Left-click keeps its usual cycling behavior. The notch

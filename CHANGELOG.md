@@ -2,6 +2,18 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.6] - 2026-11-08
+
+### Added
+- Right-click the volume button or volume slider on the Music tab to pick which audio source will be adjusted, including active output playback devices and specific apps (per-app volume mixer).
+- Per-app audio mixer support: choose running applications (such as Spotify, Discord, Chrome or System Sounds) or output endpoints from the context menu. Adjusting the slider, mouse wheel scrolling or mute button directly controls that app's volume session.
+- Context menus for volume targets display matching icons for headphones, displays, speakers, apps and system sounds, with an accent checkmark on the selected target.
+- Auto option for lyrics mode that reapplies your chosen lyrics style preset from Settings.
+
+### Changed
+- The volume icon and slider knob and fill tint with the notch accent colour when adjusting an app or non-default audio source, clearly indicating per-app mixer mode.
+- Volume tooltips show the active target app or source name along with the right-click shortcut hint.
+
 ## [1.0.5] - 2026-11-04
 
 ### Added

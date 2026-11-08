@@ -24,6 +24,7 @@ pub const PANEL_ALT_LABELS: [&str; 3] = ["Off", "Romaji", "Translation"];
 pub enum LyricsMode {
     #[default]
     Off,
+    Auto,
     Outside,
     Inside,
     Both,
@@ -162,6 +163,7 @@ impl Look {
 impl Config {
     pub fn lyrics_mode(&self) -> LyricsMode {
         if !self.lyrics_pill { LyricsMode::Off }
+        else if self.lyrics_auto_mode { LyricsMode::Auto }
         else if self.lyrics_place == 2 { LyricsMode::Both }
         else if self.lyrics_place == 1 { LyricsMode::Inside }
         else { LyricsMode::Outside }
@@ -169,10 +171,11 @@ impl Config {
 
     pub fn cycle_lyrics_mode(&mut self) -> LyricsMode {
         match self.lyrics_mode() {
-            LyricsMode::Off => { self.lyrics_pill = true; self.lyrics_place = 0; }
-            LyricsMode::Outside => { self.lyrics_place = 1; }
-            LyricsMode::Inside => { self.lyrics_place = 2; }
-            LyricsMode::Both => { self.lyrics_pill = false; }
+            LyricsMode::Auto => { self.lyrics_auto_mode = false; self.lyrics_place = 0; }
+            LyricsMode::Off => { self.lyrics_auto_mode = false; self.lyrics_pill = true; self.lyrics_place = 0; }
+            LyricsMode::Outside => { self.lyrics_auto_mode = false; self.lyrics_place = 1; }
+            LyricsMode::Inside => { self.lyrics_auto_mode = false; self.lyrics_place = 2; }
+            LyricsMode::Both => { self.lyrics_auto_mode = false; self.lyrics_pill = false; }
         }
         self.lyrics_mode()
     }
@@ -213,6 +216,7 @@ pub fn preset_of(c: &Config) -> usize {
 
 /// Sets the choices a preset stands for; "Custom" leaves them as they are.
 pub fn apply_preset(c: &mut Config) {
+    c.lyrics_selected_preset = c.lyrics_preset;
     if let Some(&(place, backdrop, highlight, color)) = PRESETS.get(c.lyrics_preset) {
         (c.lyrics_place, c.lyrics_backdrop, c.lyrics_highlight, c.lyrics_color) = (place, backdrop, highlight, color);
     }
@@ -241,6 +245,7 @@ pub fn sanitize(c: &mut Config) {
     c.lyrics_second = c.lyrics_second.min(SECOND_LABELS.len() - 1);
     c.lyrics_panel_alt = c.lyrics_panel_alt.min(PANEL_ALT_LABELS.len() - 1);
     c.lyrics_preset = preset_of(c);
+    c.lyrics_selected_preset = c.lyrics_selected_preset.min(PRESET_LABELS.len() - 1);
 }
 
 /// How far through line `i` playback is, from 0 to 1. The line is sung over the time its length
@@ -368,6 +373,37 @@ mod tests {
         sanitize(&mut c);
         assert_eq!((c.lyrics_size, c.lyrics_enter, c.lyrics_fit, c.lyrics_second), (2, 3, 2, 4));
         assert_eq!((c.lyrics_backdrop, c.lyrics_color, c.lyrics_preset), (1, 1, 4));
+    }
+
+    #[test]
+    fn auto_mode_applies_settings_preset_and_cycles_cleanly() {
+        let mut c = Config::default();
+        assert_eq!(c.lyrics_mode(), LyricsMode::Outside);
+        // Select Karaoke (preset 3) on the settings.
+        c.lyrics_preset = 3;
+        apply_preset(&mut c);
+        assert_eq!(c.lyrics_selected_preset, 3);
+        assert_eq!(c.lyrics_highlight, 1);
+        assert_eq!(c.lyrics_place, 0);
+
+        // Manually change to Inside mode.
+        c.lyrics_place = 1;
+        c.lyrics_auto_mode = false;
+        assert_eq!(c.lyrics_mode(), LyricsMode::Inside);
+
+        // Turn on Auto mode: reapplies the selected preset (Karaoke).
+        c.lyrics_auto_mode = true;
+        c.lyrics_preset = c.lyrics_selected_preset;
+        apply_preset(&mut c);
+        assert_eq!(c.lyrics_mode(), LyricsMode::Auto);
+        assert_eq!(c.lyrics_place, 0);
+        assert_eq!(c.lyrics_highlight, 1);
+
+        // Cycling from Auto transitions to Outside.
+        let next = c.cycle_lyrics_mode();
+        assert_eq!(next, LyricsMode::Outside);
+        assert!(!c.lyrics_auto_mode);
+        assert_eq!(c.lyrics_place, 0);
     }
 
     #[test]

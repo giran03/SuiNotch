@@ -73,6 +73,10 @@ pub fn lyrics_mode_glyph(cv: &Canvas, cx: f32, cy: f32, size: f32, color: C, mod
         cv.line(cx - size * 0.6, cy + size * 0.6, cx + size * 0.6, cy - size * 0.6, color, stroke);
         return;
     }
+    if mode == LyricsMode::Auto {
+        lyrics_glyph(cv, cx, cy, size, color);
+        return;
+    }
     let outside = matches!(mode, LyricsMode::Outside | LyricsMode::Both);
     let body = R::centered(cx, cy - if outside { size * 0.2 } else { 0.0 }, size * 1.2, size * 0.8);
     cv.stroke_rrect(body, size * 0.22, color, stroke);
@@ -649,12 +653,28 @@ pub fn select_lyrics_mode(app: &mut App, mode: crate::lyric_style::LyricsMode) {
     let mut cfg = app.cfg.clone();
     cfg.lyrics_pill = mode != LyricsMode::Off;
     match mode {
-        LyricsMode::Outside => cfg.lyrics_place = 0,
-        LyricsMode::Inside => cfg.lyrics_place = 1,
-        LyricsMode::Both => cfg.lyrics_place = 2,
-        LyricsMode::Off => {}
+        LyricsMode::Auto => {
+            cfg.lyrics_auto_mode = true;
+            cfg.lyrics_preset = cfg.lyrics_selected_preset;
+            crate::lyric_style::apply_preset(&mut cfg);
+        }
+        LyricsMode::Outside => {
+            cfg.lyrics_auto_mode = false;
+            cfg.lyrics_place = 0;
+        }
+        LyricsMode::Inside => {
+            cfg.lyrics_auto_mode = false;
+            cfg.lyrics_place = 1;
+        }
+        LyricsMode::Both => {
+            cfg.lyrics_auto_mode = false;
+            cfg.lyrics_place = 2;
+        }
+        LyricsMode::Off => {
+            cfg.lyrics_auto_mode = false;
+        }
     }
-    app.notch.lyrics_view = matches!(mode, LyricsMode::Inside | LyricsMode::Both);
+    app.notch.lyrics_view = matches!(cfg.lyrics_place, 1 | 2) && cfg.lyrics_pill;
     app.notch.recent_view &= !app.notch.lyrics_view;
     app.set_config(cfg);
     crate::settings::refresh(app);

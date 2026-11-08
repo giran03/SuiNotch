@@ -205,31 +205,35 @@ fn source_toggle(cv: &Canvas, app: &mut App, cx: f32, cy: f32, sources: usize) {
 fn volume_control(cv: &mut Canvas, app: &mut App, x: f32, cy: f32, available: f32) {
     let Some(audio) = app.audio.as_ref() else { return };
     let (level, muted) = audio.get();
+    let is_custom = !audio.is_master();
     let open = app.notch.volume_open.value.clamp(0.0, 1.0);
     if open > 0.02 {
         let layout = views::volume_layout(x, cy, available, app.notch.lyrics_view);
         hit(app, layout.hit, Hit::VolumeBar);
-        draw_volume_flyout(cv, layout, level, muted, open);
+        let accent = views::accent(app);
+        draw_volume_flyout(cv, layout, level, muted, open, is_custom, accent);
     }
     let g = if muted || level <= 0.001 { icon::MUTE } else { icon::VOLUME };
-    icon_button(cv, app, x, cy, 12.0, g, Hit::Volume, DIM);
+    let tint = if is_custom { views::accent(app) } else { DIM };
+    icon_button(cv, app, x, cy, 12.0, g, Hit::Volume, tint);
 }
 
-pub(crate) fn draw_volume_flyout(cv: &mut Canvas, layout: views::VolumeLayout, level: f32, muted: bool, open: f32) {
+pub(crate) fn draw_volume_flyout(cv: &mut Canvas, layout: views::VolumeLayout, level: f32, muted: bool, open: f32, custom: bool, accent: C) {
     let (pill, track) = (layout.pill, layout.track);
     let frac = if muted { 0.0 } else { level.clamp(0.0, 1.0) };
     let horizontal = track.w > track.h;
     let (knob_x, knob_y) = if horizontal { (track.x + track.w * frac, track.cy()) } else { (track.cx(), track.bottom() - track.h * frac) };
     let radius = track.w.min(track.h) / 2.0;
+    let fill_color = if custom { accent } else { C::WHITE };
     cv.push_opacity(open);
     cv.fill_rrect(pill, 14.0, C::BLACK);
     cv.fill_rrect(pill, 14.0, C::WHITE.a(0.10));
     cv.fill_rrect(track, radius, C::WHITE.a(0.16));
     if frac > 0.0 {
         let fill = if horizontal { R::new(track.x, track.y, track.w * frac, track.h) } else { R::new(track.x, knob_y, track.w, track.bottom() - knob_y) };
-        cv.fill_rrect(fill, radius, C::WHITE);
+        cv.fill_rrect(fill, radius, fill_color);
     }
-    cv.fill_circle(knob_x, knob_y, 5.0, C::WHITE);
+    cv.fill_circle(knob_x, knob_y, 5.0, fill_color);
     cv.pop();
 }
 
