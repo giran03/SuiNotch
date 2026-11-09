@@ -68,7 +68,16 @@ struct Entry {
     /// Per line, its words as (start ms, duration ms, characters); empty when the song has no word timing.
     #[serde(default)]
     words: Vec<Vec<(u64, u64, usize)>>,
+    /// How the words were matched to the lines (see `WORDS_VERSION`); 0 in files from before it was kept.
+    #[serde(default)]
+    words_version: u32,
 }
+
+/// Raised whenever matching words to lines, or reading romaji, gets better, so songs kept with the old
+/// code are looked up again. 1: Japanese and Chinese matched a character at a time, kanji spelled two
+/// ways, lines broken differently between services. 2: romaji written as words, not syllables.
+/// 3: romaji and translations only from the same lyrics, each under the line with the same words.
+const WORDS_VERSION: u32 = 3;
 
 fn words_to_tuples(words: &[Vec<Word>]) -> Vec<Vec<(u64, u64, usize)>> {
     words.iter().map(|line| line.iter().map(|w| (w.start_ms, w.dur_ms, w.chars)).collect()).collect()
@@ -83,7 +92,7 @@ fn to_pairs(lines: &[Line]) -> Vec<(u64, String)> {
 }
 
 fn from_pairs(pairs: Vec<(u64, String)>) -> Vec<Line> {
-    pairs.into_iter().map(|(at_ms, text)| Line { at_ms, text }).collect()
+    pairs.into_iter().map(|(at_ms, text)| Line { at_ms, text: crate::lrc::strip_word_stamps(&text) }).collect()
 }
 
 fn dir() -> PathBuf {
@@ -129,11 +138,17 @@ fn cached(entry: Entry, duration_ms: u64, now: i64, fallback: bool) -> Option<Ca
         Kind::Miss => (now - entry.at < MISS_TTL_S && (entry.fallback || !fallback)).then_some(Cached::Miss),
         Kind::Instrumental => Some(Cached::Instrumental),
         Kind::Lyrics if entry.lines.is_empty() => None,
+        // Kept before word stamps were read: fetch again for clean text and word timing. Lyrics the
+        // user chose to keep are not replaced; `from_pairs` cleans their text instead.
+        Kind::Lyrics if !entry.pinned && entry.lines.iter().any(|(_, text)| crate::lrc::has_word_stamps(text)) => None,
+        // Word timing, romaji or a translation from older code: look the song up again for the better version.
+        Kind::Lyrics if !entry.pinned && (!entry.words.is_empty() || !entry.romaji.is_empty() || !entry.translation.is_empty()) && entry.words_version < WORDS_VERSION => None,
         Kind::Lyrics => Some(Cached::Lyrics(Found {
             lines: from_pairs(entry.lines),
             source: entry.source,
             synced: entry.synced,
-            translation: from_pairs(entry.translation),
+            // Kept before only English translations were shown.
+            translation: crate::lrc::english_only(from_pairs(entry.translation)),
             romaji: from_pairs(entry.romaji),
             words: words_from_tuples(entry.words),
             id: entry.id,
@@ -160,6 +175,7 @@ pub fn store(key: u64, duration_ms: u64, found: &Found) {
         translation: to_pairs(&found.translation),
         romaji: to_pairs(&found.romaji),
         words: words_to_tuples(&found.words),
+        words_version: WORDS_VERSION,
     });
 }
 
@@ -173,7 +189,7 @@ pub fn store_empty(key: u64, duration_ms: u64, kind: Kind, fallback: bool) {
 }
 
 fn empty_entry(kind: Kind, at: i64, duration_ms: u64) -> Entry {
-    Entry { kind, at, pinned: false, id: String::new(), fallback: false, source: Source::Lrclib, synced: false, duration_ms, lines: Vec::new(), translation: Vec::new(), romaji: Vec::new(), words: Vec::new() }
+    Entry { kind, at, pinned: false, id: String::new(), fallback: false, source: Source::Lrclib, synced: false, duration_ms, lines: Vec::new(), translation: Vec::new(), romaji: Vec::new(), words: Vec::new(), words_version: WORDS_VERSION }
 }
 
 /// Keeps (or stops keeping) a song's cached lyrics through later lookups; false when none are cached.
@@ -276,6 +292,7 @@ mod tests {
             translation: vec![(500, "salut".into())],
             romaji: Vec::new(),
             words: words_to_tuples(&[vec![Word { start_ms: 500, dur_ms: 120, chars: 2 }]]),
+            words_version: WORDS_VERSION,
         };
         let back: Entry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(words_from_tuples(back.words.clone()), vec![vec![Word { start_ms: 500, dur_ms: 120, chars: 2 }]]);
@@ -300,6 +317,24 @@ mod tests {
         // Another edit of the song is not this one, whatever was found for it.
         assert!(cached(empty_entry(Kind::Miss, now, 200_000), 300_000, now, false).is_none());
         assert!(cached(empty_entry(Kind::Lyrics, now, 200_000), 200_000, now, false).is_none(), "lyrics without lines are no lyrics");
+    }
+
+    #[test]
+    fn word_timing_matched_by_older_code_is_looked_up_again_unless_kept() {
+        let now = 10_000_000;
+        let lyrics = |words_version: u32, pinned: bool| Entry {
+            lines: vec![(500, "hi".into())],
+            words: words_to_tuples(&[vec![Word { start_ms: 500, dur_ms: 120, chars: 2 }]]),
+            words_version,
+            pinned,
+            ..empty_entry(Kind::Lyrics, now, 200_000)
+        };
+        assert!(cached(lyrics(0, false), 200_000, now, true).is_none());
+        assert!(matches!(cached(lyrics(WORDS_VERSION, false), 200_000, now, true), Some(Cached::Lyrics(_))));
+        assert!(matches!(cached(lyrics(0, true), 200_000, now, true), Some(Cached::Lyrics(_))));
+        // Lyrics without word timing have nothing to match again.
+        let plain = Entry { words: Vec::new(), ..lyrics(0, false) };
+        assert!(matches!(cached(plain, 200_000, now, true), Some(Cached::Lyrics(_))));
     }
 
     #[test]

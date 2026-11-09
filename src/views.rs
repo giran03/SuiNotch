@@ -241,13 +241,13 @@ fn draw_tooltip(cv: &mut Canvas, app: &App, body: R) {
 fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
     let cy = body.h / 2.0;
     let accent = accent(app);
+    app.notch.marquee = false;
     if notch::mascot_visible(app) || notch::sui_reacting(app) {
         let body_color = C::hex(0xEAF6FF).mix(accent, 0.25);
         app.notch.mascot.draw(cv, body.cx(), cy - 1.0, 19.0, body_color);
         return;
     }
-    if let Some(m) = app.media.as_ref() {
-        let playing = m.info.playing;
+    if let Some(playing) = app.media.as_ref().map(|m| m.info.playing) {
         let art = R::new(body.x + 12.0, cy - 10.0, 20.0, 20.0);
         pages::draw_art(cv, app, art, 5.0);
         let color = app.art_color.unwrap_or(accent);
@@ -263,7 +263,14 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
         } else {
             cv.glyph(if playing { icon::PLAY } else { icon::PAUSE }, ex + 7.0, cy, 10.0, DIM);
         }
-        closed_track(cv, app, R::new(art.right() + 10.0, 0.0, ex - 12.0 - (art.right() + 10.0), body.h));
+        // A title goes round from its start whenever it changes or the music starts again.
+        let title = app.media.as_ref().map(|m| m.info.title.clone()).unwrap_or_default();
+        if !playing || app.notch.title_shown != title {
+            app.notch.title_shown = title;
+            app.notch.title_since = std::time::Instant::now();
+        }
+        let track = R::new(art.right() + 10.0, 0.0, ex - 12.0 - (art.right() + 10.0), body.h);
+        app.notch.marquee = closed_track(cv, app, track);
         return;
     }
     if app.pomo.is_running() {
@@ -297,25 +304,28 @@ fn draw_closed(cv: &mut Canvas, app: &mut App, body: R) {
 }
 
 /// The song title in the closed notch, then the artist in the space that's left. With the In the notch
-/// lyric style, the current lyric line fades in over the title while there is one.
-fn closed_track(cv: &mut Canvas, app: &App, r: R) {
+/// lyric style, the current lyric line fades in over the title while there is one. Returns whether the
+/// title or the line is scrolling, and so needs a steady stream of frames.
+fn closed_track(cv: &mut Canvas, app: &App, r: R) -> bool {
     let look = app.cfg.lyric_look();
     let lyric = look.in_notch()
         .then(|| app.notch.pill_line.and_then(|i| app.lyrics.get(i).map(|l| (i, l.text.clone()))))
         .flatten();
     let shown = if lyric.is_some() { app.notch.pill_alpha.value.clamp(0.0, 1.0) } else { 0.0 };
+    let mut moving = false;
     if shown < 0.99 {
         cv.push_opacity(1.0 - shown);
-        title_and_artist(cv, app, r);
+        moving |= title_and_artist(cv, app, r);
         cv.pop();
     }
     if let (Some((i, text)), true) = (lyric, shown > 0.01 && r.w >= 24.0) {
         let second = if app.has_second_line() { app.second_line(i) } else { None };
         let frame = lyric_frame(app, look, &text, second.as_deref(), i);
         cv.push_opacity(shown * paused_dim(app));
-        crate::lyric_draw::draw_in_notch(cv, r, &frame);
+        moving |= crate::lyric_draw::draw_in_notch(cv, r, &frame);
         cv.pop();
     }
+    moving
 }
 
 /// Opacity of the lyric line: dimmed while the music is paused and the line is kept on show.
@@ -340,24 +350,29 @@ fn lyric_frame<'a>(app: &App, look: crate::lyric_style::Look, text: &'a str, sec
             crate::lyric_draw::Fill::Even(crate::lyric_style::progress(&app.lyrics, i, app.lyric_pos().unwrap_or(0)))
         },
         secs: app.notch.line_since.elapsed().as_secs_f32(),
+        sung_s: crate::lyric_style::sing_ms(&app.lyrics, i) as f32 / 1000.0,
         art: app.art_color,
         accent: accent(app),
         glass: app.cfg.glass,
     }
 }
 
-fn title_and_artist(cv: &Canvas, app: &App, r: R) {
-    let Some(info) = app.media.as_ref().map(|m| &m.info) else { return };
+/// The song title, and the artist after it when there is room. A title too wide for the notch goes
+/// round while the music plays. Returns whether it is moving.
+fn title_and_artist(cv: &mut Canvas, app: &App, r: R) -> bool {
+    let Some(info) = app.media.as_ref().map(|m| &m.info) else { return false };
     if r.w < 24.0 {
-        return;
+        return false;
     }
     let (title, artist) = if info.title.trim().is_empty() { (info.artist.as_str(), "") } else { (info.title.as_str(), info.artist.as_str()) };
+    let secs = info.playing.then(|| app.notch.title_since.elapsed().as_secs_f32());
+    let moving = crate::lyric_draw::draw_marquee(cv, r, title, 12.5, 600, C::WHITE, secs);
     let title_w = app.gfx.text_width(title, 12.5, 600).min(r.w);
-    cv.text(title, R::new(r.x, r.y, title_w + 1.0, r.h), 12.5, 600, C::WHITE, Align::Left);
     let rest = r.w - title_w - 8.0;
     if !artist.is_empty() && rest > 40.0 {
         cv.text(artist, R::new(r.x + title_w + 8.0, r.y, rest, r.h), 12.0, 500, DIM, Align::Left);
     }
+    moving
 }
 
 /// A small progress ring (or a stopwatch glyph without progress) and the time, in the closed notch.

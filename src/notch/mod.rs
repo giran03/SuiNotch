@@ -101,6 +101,11 @@ pub struct Notch {
     pub line_since: Instant,
     /// The line on show is wider than the most that is drawn, so it scrolls, shrinks or is cut.
     pub pill_overflow: bool,
+    /// The song title in the closed notch, and when it began going round, for a title too wide to show.
+    pub title_shown: String,
+    pub title_since: Instant,
+    /// The closed notch's song title or lyric line is scrolling, so it needs a steady stream of frames.
+    pub marquee: bool,
     pub expanded: bool,
     pub hovering: bool,
     pub hud: Option<(Hud, Instant)>,
@@ -230,6 +235,9 @@ impl Notch {
             pill_h: Spring::new(26.0, 0.3, 0.9),
             line_since: Instant::now(),
             pill_overflow: false,
+            title_shown: String::new(),
+            title_since: Instant::now(),
+            marquee: false,
             expanded: false,
             hovering: false,
             hud: None,

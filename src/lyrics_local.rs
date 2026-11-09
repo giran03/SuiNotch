@@ -58,13 +58,14 @@ pub fn find(info: &MediaInfo) -> Option<Found> {
 fn parse(text: &str, duration_ms: u64, name: &str) -> Option<Found> {
     let synced = lrc::parse(text);
     let (lines, timed) = if synced.is_empty() { (lrc::from_plain(text, duration_ms), false) } else { (synced, true) };
+    let words = if timed { crate::lyrics::lrc_words(&lines, text, duration_ms) } else { Vec::new() };
     (!lines.is_empty()).then(|| Found {
         lines,
         source: Source::Local,
         synced: timed,
         translation: Vec::new(),
         romaji: Vec::new(),
-        words: Vec::new(),
+        words,
         id: format!("local:{name}"),
     })
 }

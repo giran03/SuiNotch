@@ -13,9 +13,9 @@ For the song playing, SuiNotch tries, in order:
 3. **LRCLIB**, under the player's names. The exact match (`/api/get`, by name and length) and the search are asked side by side.
    - Synced lyrics win.
    - An exact match marked instrumental shows "Instrumental".
-   - Records with word timing (`hasWordSync`) give word-by-word lyrics without NetEase.
+   - Records with word timing (`hasWordSync`) give word-by-word lyrics without a backup service.
 4. **Native-script names** from Apple's store, only when the first try found nothing synced.
-5. **NetEase**, with Fall back to other services.
+5. **Backup lyrics services**, with Fall back to other services.
 
 A song's first search repeats unsuccessful rounds up to Keep searching for (5 retries by default, or 6 total rounds), including when services answer "no such song". It stops as soon as lyrics or an instrumental result is found. Zero retries means one round. Search again advances to an alternative match in a single round. The wait doubles each retry (1, 2, 4, 8 s) plus jitter. A service's `Retry-After` is honoured, and every request has an 8-second timeout. Requests to one service are spaced at least 250 ms (LRCLIB) or 150 ms (others) apart. Changing track, pausing, turning lyrics Off or changing source permissions cancels pending automatic work. The User-Agent names the app, its version and its homepage, as LRCLIB asks.
 

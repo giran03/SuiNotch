@@ -45,6 +45,8 @@ pub struct Frame<'a> {
     pub fill: Fill,
     /// Seconds since the line appeared, for scrolling.
     pub secs: f32,
+    /// Seconds the line takes to sing, which a long line scrolls in time with.
+    pub sung_s: f32,
     /// The album's colour, when there is a cover, and the accent.
     pub art: Option<C>,
     pub accent: C,
@@ -110,14 +112,32 @@ fn fitted(cv: &Canvas, f: &Frame, text: &str, run: &Run, avail: f32) -> (f32, f3
 fn draw_run(cv: &mut Canvas, f: &Frame, rect: R, text: &str, run: &Run) {
     let (size, tw) = fitted(cv, f, text, run, rect.w);
     let scrolling = f.look.fit == lyric_style::Fit::Scroll && tw > rect.w + 0.5;
-    let visible = tw.min(rect.w);
     let x0 = if scrolling {
-        rect.x - lyric_style::scroll_offset(tw - rect.w, f.secs)
+        rect.x - lyric_style::scroll_offset(tw - rect.w, f.secs, f.sung_s)
     } else if run.left {
         rect.x
     } else {
-        rect.cx() - visible / 2.0
+        rect.cx() - tw.min(rect.w) / 2.0
     };
+    draw_at(cv, f, rect, Set { x0, size, tw, sliding: scrolling }, text, run);
+}
+
+/// Where and how big a run is drawn this frame.
+#[derive(Clone, Copy)]
+struct Set {
+    /// Left edge of the text.
+    x0: f32,
+    size: f32,
+    /// Width of the text at `size`.
+    tw: f32,
+    /// The text slides through `rect` and is clipped to it, rather than cut with an ellipsis.
+    sliding: bool,
+}
+
+/// Draws `run` of `text` in `rect`, placed as `set` says.
+fn draw_at(cv: &mut Canvas, f: &Frame, rect: R, set: Set, text: &str, run: &Run) {
+    let Set { x0, size, tw, sliding: scrolling } = set;
+    let visible = tw.min(rect.w);
     let width = if scrolling { tw + 8.0 } else { visible + if tw <= rect.w { 8.0 } else { 0.0 } };
     let shown = if f.look.enter == Enter::Typewriter { lyric_style::typed(text, f.fade) } else { text };
     let at = R::new(x0, rect.y + f.slide(), width, rect.h);
@@ -209,17 +229,48 @@ pub fn draw_under(cv: &mut Canvas, r: R, f: &Frame) {
     }
 }
 
-/// The line in the closed notch, left-aligned in the space the song title takes; the second text,
-/// when it fits after it, follows in a dimmer colour.
-pub fn draw_in_notch(cv: &mut Canvas, r: R, f: &Frame) {
+/// The line in the closed notch, left-aligned in the space the song title takes, with the second text
+/// following it in a dimmer colour. When the two are wider than the space, they scroll through it
+/// together once, so the whole line and its romaji or translation can be read; with the Cut fit, the
+/// line is cut instead and the second text left out. Returns whether the line is still scrolling.
+pub fn draw_in_notch(cv: &mut Canvas, r: R, f: &Frame) -> bool {
     let first = first_run(f, false, true);
-    draw_run(cv, f, r, f.text, &first);
-    let Some(second) = f.second else { return };
-    let (_, tw) = fitted(cv, f, f.text, &first, r.w);
-    let rest = r.w - tw - SUFFIX_GAP;
+    let (size, tw) = fitted(cv, f, f.text, &first, r.w);
     let run = second_run(f, false, true, 1.0);
-    let (_, sw) = fitted(cv, f, second, &run, f32::MAX);
-    if sw <= rest {
-        draw_run(cv, f, R::new(r.x + tw + SUFFIX_GAP, r.y, rest, r.h), second, &run);
+    let second = f.second.map(|s| (s, fitted(cv, f, s, &run, f32::MAX)));
+    let strip = tw + second.map_or(0.0, |(_, (_, sw))| SUFFIX_GAP + sw);
+    if strip <= r.w + 0.5 || f.look.fit == lyric_style::Fit::Cut {
+        draw_at(cv, f, r, Set { x0: r.x, size, tw, sliding: false }, f.text, &first);
+        if let Some((text, (ss, sw))) = second.filter(|(_, (_, sw))| tw + SUFFIX_GAP + sw <= r.w + 0.5) {
+            let rest = R::new(r.x + tw + SUFFIX_GAP, r.y, sw, r.h);
+            draw_at(cv, f, rest, Set { x0: rest.x, size: ss, tw: sw, sliding: false }, text, &run);
+        }
+        return false;
     }
+    let overflow = strip - r.w;
+    let x0 = r.x - lyric_style::scroll_offset(overflow, f.secs, f.sung_s);
+    draw_at(cv, f, r, Set { x0, size, tw, sliding: true }, f.text, &first);
+    if let Some((text, (ss, sw))) = second {
+        draw_at(cv, f, r, Set { x0: x0 + tw + SUFFIX_GAP, size: ss, tw: sw, sliding: true }, text, &run);
+    }
+    lyric_style::still_scrolling(overflow, f.secs, f.sung_s)
+}
+
+/// A song title in `r` that, when it is too wide, goes round: it rests at its start, scrolls left, and
+/// its start follows its end after a gap. `secs` is how long it has been going round; `None` holds it
+/// still and cuts it with an ellipsis. Returns whether it is moving.
+pub fn draw_marquee(cv: &mut Canvas, r: R, text: &str, size: f32, weight: i32, color: C, secs: Option<f32>) -> bool {
+    let tw = cv.gfx.text_width(text, size, weight);
+    let Some(secs) = secs.filter(|_| tw > r.w + 0.5) else {
+        cv.text(text, R::new(r.x, r.y, tw.min(r.w) + 1.0, r.h), size, weight, color, Align::Left);
+        return false;
+    };
+    let lap = tw + lyric_style::MARQUEE_GAP;
+    let x = r.x - lyric_style::marquee_offset(lap, secs);
+    cv.push_clip_rect(R::new(r.x, r.y - 4.0, r.w, r.h + 8.0));
+    for x in [x, x + lap] {
+        cv.text(text, R::new(x, r.y, tw + 8.0, r.h), size, weight, color, Align::Left);
+    }
+    cv.pop();
+    true
 }

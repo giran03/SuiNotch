@@ -102,9 +102,21 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric()
 }
 
-fn same_text(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.chars().filter(|c| is_word_char(*c)).flat_map(char::to_lowercase).collect::<Vec<char>>();
-    norm(a) == norm(b)
+/// At most this share of a line's letters may differ between two services and it still be the same
+/// line: one service may write a kanji in its Simplified Chinese form (間 as 间, 無 as 无).
+const MAX_DIFFERENT_PERCENT: usize = 15;
+/// Lines shorter than this must match exactly, as one letter is too large a share of them.
+const MIN_CHARS_TO_DIFFER: usize = 6;
+
+/// Whether two lines are the same line, letter for letter but for case, punctuation and a few letters
+/// spelled differently. Their letters line up one to one, so a service's words can be laid over the other's.
+pub(crate) fn same_text(a: &str, b: &str) -> bool {
+    let (a, b) = (norm_of(a), norm_of(b));
+    if a == b {
+        return true;
+    }
+    let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+    a.len() == b.len() && a.len() >= MIN_CHARS_TO_DIFFER && differ * 100 <= a.len() * MAX_DIFFERENT_PERCENT
 }
 
 /// Gives each timed word the stretch of `line` it covers, in characters. The words' letters and digits
@@ -152,12 +164,23 @@ pub fn attach(lines: &[Line], timed: &[TimedLine]) -> Vec<Vec<Word>> {
                 .iter()
                 .filter(|t| t.start_ms.abs_diff(line.at_ms) <= MATCH_TOLERANCE_MS && same_text(&t.text, &line.text))
                 .min_by_key(|t| t.start_ms.abs_diff(line.at_ms));
-            match same {
+            let words = match same {
                 Some(t) => cover(&line.text, &t.words),
                 None => align(line, lines.get(i + 1).map(|n| n.at_ms), &stream),
-            }
+            };
+            starting_with(words, line.at_ms)
         })
         .collect()
+}
+
+/// Words that another service has starting before the line does start with it instead: the two
+/// services' clocks for a line differ by a few hundred ms either way, and the line on show is this one's.
+fn starting_with(mut words: Vec<Word>, line_ms: u64) -> Vec<Word> {
+    for w in words.iter_mut().filter(|w| w.start_ms < line_ms) {
+        w.dur_ms = (w.start_ms + w.dur_ms).saturating_sub(line_ms);
+        w.start_ms = line_ms;
+    }
+    words
 }
 
 // ------------------------------------------------------------------ vetting
@@ -317,21 +340,19 @@ fn flatten(timed: &[TimedLine]) -> Vec<Sung> {
     all
 }
 
-/// A line's words as (letters, characters the word and the spaces after it take). Punctuation on its own joins the word before it.
+fn is_cjk(c: char) -> bool {
+    matches!(kind(c), Kind::Kana | Kind::Ideograph)
+}
+
+/// A line's words as (letters, characters the word and the spaces after it take). Punctuation on its
+/// own joins the word before it. Chinese, Japanese and Korean are written without spaces and timed a
+/// character at a time, so each of their characters is a word of its own.
 fn tokens(text: &str) -> Vec<(Vec<char>, usize)> {
     let mut out: Vec<(Vec<char>, usize)> = Vec::new();
-    let mut chars = text.chars().peekable();
     let mut lead = 0;
-    while chars.peek().is_some() {
-        let mut word = String::new();
-        while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
-            word.push(c);
-        }
-        let mut len = word.chars().count();
-        while chars.next_if(|c| c.is_whitespace()).is_some() {
-            len += 1;
-        }
-        let norm = norm_of(&word);
+    let mut push = |piece: &str, out: &mut Vec<(Vec<char>, usize)>| {
+        let len = piece.chars().count();
+        let norm = norm_of(piece);
         match (norm.is_empty(), out.last_mut()) {
             (true, Some(prev)) => prev.1 += len,
             (true, None) => lead += len,
@@ -340,6 +361,21 @@ fn tokens(text: &str) -> Vec<(Vec<char>, usize)> {
                 lead = 0;
             }
         }
+    };
+    let mut chars = text.char_indices().peekable();
+    while let Some(&(start, first)) = chars.peek() {
+        // A character of its own, or a run of other non-space characters, then the spaces after it.
+        let mut end = start + first.len_utf8();
+        chars.next();
+        if !is_cjk(first) {
+            while let Some((i, c)) = chars.next_if(|&(_, c)| !c.is_whitespace() && !is_cjk(c)) {
+                end = i + c.len_utf8();
+            }
+        }
+        while let Some((i, c)) = chars.next_if(|&(_, c)| c.is_whitespace()) {
+            end = i + c.len_utf8();
+        }
+        push(&text[start..end], &mut out);
     }
     out
 }
@@ -368,7 +404,10 @@ fn align(line: &Line, next_at: Option<u64>, stream: &[Sung]) -> Vec<Word> {
     let mut hit: Vec<Option<&Sung>> = vec![None; n];
     let (mut i, mut j) = (0, 0);
     while i < n && j < m {
-        if toks[i].0 == near[j].norm {
+        // A word sung before the line starts may end the line before; when passing it over loses
+        // nothing, the same word sung later is taken instead.
+        let early = near[j].start_ms + WORD_SLACK_MS < line.at_ms && len[i][j + 1] == len[i][j];
+        if toks[i].0 == near[j].norm && !early {
             hit[i] = Some(near[j]);
             i += 1;
             j += 1;
@@ -388,9 +427,19 @@ fn align(line: &Line, next_at: Option<u64>, stream: &[Sung]) -> Vec<Word> {
         }
         // A run of words nobody sang a match for shares the time from the last one's end to the next one's start.
         let run_end = (k..n).find(|&x| hit[x].is_some()).unwrap_or(n);
-        let begin = out.last().map_or(line.at_ms, |w| w.start_ms + w.dur_ms);
+        let mut begin = out.last().map_or(line.at_ms, |w| w.start_ms + w.dur_ms);
         let count = (run_end - k) as u64;
-        let finish = hit.get(run_end).copied().flatten().map_or(begin + count * UNMATCHED_MS, |w| w.start_ms).max(begin + count);
+        let finish = match hit.get(run_end).copied().flatten() {
+            Some(next_word) => next_word.start_ms.max(begin + count),
+            // Words left over at the end fit in before the next line, rather than running into it:
+            // there they would take a line that is no longer on show.
+            None => {
+                let last_start = out.last().map_or(line.at_ms, |w| w.start_ms);
+                let limit = next_at.map_or(u64::MAX, |n| n.max(last_start));
+                begin = begin.min(limit);
+                (begin + count * UNMATCHED_MS).min(limit).max(begin)
+            }
+        };
         let share = (finish - begin) / count;
         for (step, x) in (k..run_end).enumerate() {
             out.push(Word { start_ms: begin + share * step as u64, dur_ms: share, chars: toks[x].1 });
@@ -516,6 +565,11 @@ fn pieces(text: &str) -> Vec<(usize, f32)> {
     out
 }
 
+/// How many sounds a line has: syllables of Latin words, and each kana mora or Chinese or Korean character.
+pub fn sounds(text: &str) -> usize {
+    pieces(text).len()
+}
+
 /// Words for a line that starts at `start_ms` and is sung over `sing_ms`, made up from its text: each
 /// sound gets a share of the time as long as it is. Not what the singer did, but it moves like it.
 pub fn estimate(text: &str, start_ms: u64, sing_ms: u64) -> Vec<Word> {
@@ -615,6 +669,56 @@ mod tests {
         assert_eq!((w[0][0].start_ms, w[0][6].start_ms, w[0][10].start_ms), (9520, 10_720, 11_270));
         assert_eq!(w[0].iter().map(|x| x.chars).sum::<usize>(), text.chars().count());
         assert!(w[1].is_empty());
+    }
+
+    #[test]
+    fn a_line_with_a_kanji_spelled_another_way_still_takes_its_words() {
+        // The service writes 間 in its Simplified Chinese form 间.
+        let timed = parse_yrc("[15288,3000](15288,200,0)い(15488,200,0)つ(15688,200,0)の(15888,200,0)间(16088,200,0)に(16288,200,0)か(16488,200,0)そ(16688,200,0)れ(16888,200,0)は");
+        let w = attach(&[line(14890, "いつの間にかそれは")], &timed);
+        assert_eq!(w[0].len(), 9);
+        assert_eq!((w[0][3].start_ms, w[0][3].chars), (15_888, 1));
+        // Short lines must still match exactly.
+        assert!(!same_text("間に", "间に"));
+        assert!(same_text("いつの間にかそれは", "いつの间にかそれは"));
+    }
+
+    #[test]
+    fn japanese_lines_broken_differently_are_lined_up_by_character() {
+        let timed = parse_yrc("[21700,3000](21700,200,0)物(21900,200,0)差(22100,200,0)し(22300,200,0)だ\n[24711,2000](24711,224,0)何(24935,800,0)か");
+        let text = "物差しだ 何か";
+        let w = attach(&[line(21_440, text), line(27_880, "next")], &timed);
+        assert_eq!(w[0].iter().map(|x| x.start_ms).collect::<Vec<_>>(), vec![21_700, 21_900, 22_100, 22_300, 24_711, 24_935]);
+        assert_eq!(w[0].iter().map(|x| x.chars).sum::<usize>(), text.chars().count());
+    }
+
+    #[test]
+    fn a_word_from_the_line_before_is_not_taken_when_the_same_word_comes_later() {
+        // "た" ends the line before (at 9900) and is sung again in this line.
+        let timed = parse_yrc("[9000,1000](9900,100,0)た\n[10000,2000](10000,300,0)君(10300,300,0)と(10600,300,0)た(10900,300,0)び");
+        let w = attach(&[line(10_000, "君とたび")], &timed);
+        assert_eq!(w[0].iter().map(|x| x.start_ms).collect::<Vec<_>>(), vec![10_000, 10_300, 10_600, 10_900]);
+    }
+
+    #[test]
+    fn words_left_over_at_the_end_fit_in_before_the_next_line() {
+        // The service breaks the line in two and sings "dd" long after this line's slot ends.
+        let timed = parse_yrc("[1000,1000](1000,300,0)aa (1300,300,0)bb (1600,300,0)cc\n[9000,1000](9000,300,0)dd");
+        let lines = [line(1000, "aa bb cc dd"), line(2000, "next")];
+        let w = attach(&lines, &timed);
+        assert_eq!(w[0].len(), 4);
+        assert!(w[0].iter().all(|x| x.start_ms <= 2000), "{:?}", w[0]);
+        assert!(!incoherent(&lines[0], Some(2000), &w[0]));
+    }
+
+    #[test]
+    fn a_line_another_service_starts_early_starts_with_its_own_line() {
+        let timed = parse_yrc("[98216,3000](98216,921,0)仆(99137,371,0)の(99508,195,0)元(99703,232,0)に(99935,211,0)も(100146,252,0)お");
+        let lines = [line(98_710, "僕の元にもお")];
+        let w = attach(&lines, &timed);
+        assert_eq!((w[0][0].start_ms, w[0][0].dur_ms), (98_710, 427));
+        assert_eq!(w[0][1].start_ms, 99_137);
+        assert!(!incoherent(&lines[0], None, &w[0]));
     }
 
     #[test]

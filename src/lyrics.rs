@@ -1,5 +1,6 @@
 //! Synced lyrics for a song: your own files first (see `lyrics_local`), then the cache on disk (see
-//! `lyrics_cache`), then LRCLIB (see `lrclib`) with NetEase (see `netease`) as an optional fallback.
+//! `lyrics_cache`), then LRCLIB (see `lrclib`) with NetEase (see `netease`) and Kugou (see `kugou`)
+//! as optional fallbacks. Kugou is also asked first for word timing that the lyrics lack.
 //! Only title, artist, album and length are sent.
 
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use crate::lrclib::{self, Record};
 use crate::lyrics_cache::{self, Cached, Kind};
 use crate::lyrics_net::{self, Lane};
 use crate::words::{self, Word};
-use crate::{lyrics_local, netease};
+use crate::{kugou, lyrics_local, netease};
 
 /// Where a song's lyrics came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,13 +25,15 @@ pub enum Source {
     Netease,
     /// A lyric file of your own (see `lyrics_local`).
     Local,
+    Kugou,
 }
 
 impl Source {
     pub fn name(self) -> &'static str {
         match self {
             Source::Lrclib => "LRCLIB",
-            Source::Netease => "NetEase",
+            // The backup services are not named in the app.
+            Source::Netease | Source::Kugou => "Backup service",
             Source::Local => "Your file",
         }
     }
@@ -55,9 +58,10 @@ pub struct Found {
 }
 
 impl Found {
-    fn from_netease(n: netease::Lyrics, duration_ms: u64) -> Found {
+    /// Lyrics from a fallback service (NetEase or Kugou), with their word timing vetted.
+    fn from_service(n: netease::Lyrics, source: Source, duration_ms: u64) -> Found {
         let words = kept(&n.lines, words::attach(&n.lines, &n.timed), duration_ms);
-        Found { lines: n.lines, source: Source::Netease, synced: true, translation: n.translation, romaji: n.romaji, words, id: n.id }
+        Found { lines: n.lines, source, synced: true, translation: n.translation, romaji: n.romaji, words, id: n.id }
     }
 
     pub(crate) fn from_lrclib(lines: Vec<Line>, synced: bool, id: String) -> Found {
@@ -76,6 +80,15 @@ pub enum Outcome {
     /// The song has no words.
     Instrumental,
     NotFound,
+}
+
+/// Word timing from the word stamps of enhanced LRC `text`, for the `lines` read from it; none when it has none.
+pub(crate) fn lrc_words(lines: &[Line], text: &str, duration_ms: u64) -> Vec<Vec<Word>> {
+    let timed = crate::lrc::parse_word_timing(text);
+    if timed.is_empty() {
+        return Vec::new();
+    }
+    kept(lines, words::attach(lines, &timed), duration_ms)
 }
 
 /// Word lists as they are kept: vetted (see `words::vet`), and none at all when no line has any left.
@@ -293,8 +306,9 @@ fn needs_extras(f: &Found, opts: Options) -> bool {
 }
 
 /// LRCLIB has no romaji or translations, and word timing only for some songs, so for lyrics from there
-/// those are taken from the same song on NetEase. Only those are used: the lines stay as they are, and
-/// the extras and words are matched to them by time (and, for words, by text).
+/// those are taken from the same song elsewhere: word timing from Kugou first, as it times most songs
+/// word by word, then whatever is still missing from NetEase. Only those are used: the lines stay as
+/// they are, and the extras and words are matched to them by time (and, for words, by text).
 fn with_extras(key: u64, info: &MediaInfo, mut found: Found, opts: Options) -> Found {
     if !needs_extras(&found, opts) {
         return found;
@@ -303,28 +317,44 @@ fn with_extras(key: u64, info: &MediaInfo, mut found: Found, opts: Options) -> F
         return found;
     }
     let names = names_for(info, true);
-    let looked_up = netease::lookup(&names, info.duration_ms, 1, opts.words && !found.has_words(), &[]).into_iter().next();
+    let mut merged = false;
+    if opts.words && !found.has_words() && found.source != Source::Kugou {
+        if let Some(k) = kugou::lookup(&names, info.duration_ms, 1, &[]).into_iter().next() {
+            merged |= merge_extras(&mut found, k, opts, info.duration_ms);
+        }
+    }
+    if lyrics_net::live() && needs_extras(&found, opts) {
+        if let Some(n) = netease::lookup(&names, info.duration_ms, 1, opts.words && !found.has_words(), &[]).into_iter().next() {
+            merged |= merge_extras(&mut found, n, opts, info.duration_ms);
+        }
+    }
     // Counted as asked only when the services answered: a failure or a skip may be asked again.
     if lyrics_net::live() && !lyrics_net::any_failed() {
         EXTRAS_ASKED.lock().unwrap_or_else(|e| e.into_inner()).push((key, opts.words));
     }
-    let Some(n) = looked_up else { return found };
-    merge_extras(&mut found, n, opts, info.duration_ms);
-    if opts.cache && lyrics_net::live() {
+    if merged && opts.cache && lyrics_net::live() {
         lyrics_cache::store(key, info.duration_ms, &found);
     }
     found
 }
 
 /// Takes what `found` lacks and `n` has: romaji and a translation when they are wanted, and word timing.
-fn merge_extras(found: &mut Found, n: netease::Lyrics, opts: Options, duration_ms: u64) {
+/// Nothing is taken when `n` is not the same lyrics, as when a song with a similar name was found.
+fn merge_extras(found: &mut Found, n: netease::Lyrics, opts: Options, duration_ms: u64) -> bool {
+    if !crate::lyric_extras::is_same(&found.lines, &n.lines) {
+        crate::log("backup lyrics left out: not the same lyrics as the ones shown");
+        return false;
+    }
     if opts.extras && found.translation.is_empty() && found.romaji.is_empty() {
-        found.translation = n.translation;
-        found.romaji = n.romaji;
+        if let Some(extras) = crate::lyric_extras::for_lines(&found.lines, &n.lines, &n.translation, &n.romaji) {
+            found.translation = extras.translation;
+            found.romaji = extras.romaji;
+        }
     }
     if opts.words && !found.has_words() {
         found.words = kept(&found.lines, words::attach(&found.lines, &n.timed), duration_ms);
     }
+    true
 }
 
 /// The pause before search round `round` (1 = the first retry): doubling, with a little jitter so
@@ -417,8 +447,11 @@ fn lookup(req: &Request, native: Option<Names>) -> Outcome {
     if settled(&best) || !opts.fallback {
         return outcome_of(best);
     }
-    match netease::lookup(&names, info.duration_ms, 1, opts.words, &req.skip).into_iter().next() {
-        Some(n) => Outcome::Found(Found::from_netease(n, info.duration_ms)),
+    if let Some(n) = netease::lookup(&names, info.duration_ms, 1, opts.words, &req.skip).into_iter().next() {
+        return Outcome::Found(Found::from_service(n, Source::Netease, info.duration_ms));
+    }
+    match kugou::lookup(&names, info.duration_ms, 1, &req.skip).into_iter().next() {
+        Some(k) => Outcome::Found(Found::from_service(k, Source::Kugou, info.duration_ms)),
         None => outcome_of(best),
     }
 }
@@ -430,7 +463,8 @@ fn lookup_other(req: &Request) -> Outcome {
     let names = names_for(info, req.opts.fallback);
     let mut usable = lrclib::candidates(info, &names, &req.skip);
     if req.opts.fallback {
-        usable.extend(netease::lookup(&names, info.duration_ms, 3, req.opts.words, &req.skip).into_iter().map(|n| Found::from_netease(n, info.duration_ms)));
+        usable.extend(netease::lookup(&names, info.duration_ms, 3, req.opts.words, &req.skip).into_iter().map(|n| Found::from_service(n, Source::Netease, info.duration_ms)));
+        usable.extend(kugou::lookup(&names, info.duration_ms, 3, &req.skip).into_iter().map(|k| Found::from_service(k, Source::Kugou, info.duration_ms)));
     }
     if usable.is_empty() {
         Outcome::NotFound
@@ -607,7 +641,7 @@ mod tests {
     fn extras_and_words_are_taken_only_where_missing_and_wanted() {
         let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: true };
         let lyrics = || netease::Lyrics {
-            lines: Vec::new(),
+            lines: vec![Line { at_ms: 1000, text: "hello".into() }],
             translation: vec![Line { at_ms: 1000, text: "hola".into() }],
             romaji: Vec::new(),
             timed: crate::words::parse_yrc("[1000,500](1000,250,0)hel(1250,250,0)lo"),
@@ -621,6 +655,38 @@ mod tests {
         let mut g = synced("[00:01.00]hello");
         merge_extras(&mut g, lyrics(), Options { extras: false, words: false, ..opts }, 100_000);
         assert!(g.translation.is_empty() && !g.has_words());
+    }
+
+    #[test]
+    fn another_songs_romaji_and_words_are_left_out() {
+        let opts = Options { fallback: true, cache: true, retries: 0, extras: true, words: true };
+        // Found for a song with a similar name: its lyrics are not the ones shown.
+        let other = netease::Lyrics {
+            lines: vec![Line { at_ms: 1000, text: "goodbye".into() }],
+            translation: Vec::new(),
+            romaji: vec![Line { at_ms: 1000, text: "sayonara".into() }],
+            timed: crate::words::parse_yrc("[1000,500](1000,500,0)goodbye"),
+            id: "kugou:1".into(),
+        };
+        let mut f = synced("[00:01.00]hello");
+        assert!(!merge_extras(&mut f, other, opts, 100_000));
+        assert!(f.romaji.is_empty() && !f.has_words());
+    }
+
+    /// Talks to LRCLIB and Kugou: `cargo test -- --ignored live_kugou_words_fit_lrclib_lines --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_kugou_words_fit_lrclib_lines() {
+        let opts = Options { fallback: true, cache: false, retries: 0, extras: false, words: true };
+        let info = MediaInfo { title: "Blinding Lights".into(), artist: "The Weeknd".into(), duration_ms: 200_040, ..Default::default() };
+        let names = vec![Names { title: info.title.clone(), artist: info.artist.clone() }];
+        let Some(Record::Lyrics(mut f)) = lrclib::best(&info, &names, &[]) else { panic!("lrclib has this song") };
+        let before = f.words.iter().filter(|w| !w.is_empty()).count();
+        let k = kugou::lookup(&names, info.duration_ms, 1, &[]).into_iter().next().expect("kugou has this song");
+        merge_extras(&mut f, k, Options { words: before == 0, ..opts }, info.duration_ms);
+        let timed = f.words.iter().filter(|w| !w.is_empty()).count();
+        println!("{} lrclib lines; word timing on {before} before, {timed} after", f.lines.len());
+        assert!(timed * 2 >= f.lines.len(), "most lines get word timing");
     }
 
     /// Uses a disposable data folder: `$env:APPDATA = ...\target\lyrics-toggle-test`, then

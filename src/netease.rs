@@ -23,7 +23,8 @@ const DURATION_TOLERANCE_MS: u64 = 4000;
 /// Credit lines ("作词 : ...", "Lyrics by : ...") come before the first sung line, in the opening seconds.
 const CREDITS_END_MS: u64 = 20_000;
 
-/// One song's lyrics: the original, and when NetEase has them a translation and a romanised version.
+/// One song's lyrics: the original, and when the service has them a translation and a romanised
+/// version. Kugou (see `kugou`) gives its lyrics in this shape too.
 pub struct Lyrics {
     pub lines: Vec<Line>,
     pub translation: Vec<Line>,
@@ -51,7 +52,7 @@ pub fn lookup(names: &[Names], duration_ms: u64, limit: usize, word_timing: bool
                 }
             }
             Err(e) => {
-                crate::log(&format!("netease search failed: {e}"));
+                crate::log(&format!("backup lyrics (1) search failed: {e}"));
                 break;
             }
         }
@@ -64,7 +65,7 @@ pub fn lookup(names: &[Names], duration_ms: u64, limit: usize, word_timing: bool
             lyrics.id = format!("netease:{id}");
             if word_timing {
                 lyrics.timed = word_by_word(id).unwrap_or_else(|e| {
-                    crate::log(&format!("netease word timing failed: {e}"));
+                    crate::log(&format!("backup lyrics (1) word timing failed: {e}"));
                     Vec::new()
                 });
             }
@@ -106,7 +107,7 @@ fn timed_lines(body: &str) -> Vec<TimedLine> {
 
 /// What to search for: each name's title with its artist, then the title alone in case the artist
 /// is spelled differently over there.
-fn queries(names: &[Names]) -> Vec<String> {
+pub(crate) fn queries(names: &[Names]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for n in names {
         for q in [format!("{} {}", n.title, n.artist), n.title.clone()] {
@@ -128,26 +129,30 @@ fn songs_from(body: &str) -> Vec<Value> {
 
 /// Ids of results that are the same song: a title and an artist that match one of the names, and the right length.
 fn pick_ids(songs: &[Value], names: &[Names], duration_ms: u64) -> Vec<u64> {
-    let artists: Vec<String> = names.iter().map(|n| n.artist.to_lowercase()).collect();
-    let related = |a: &str, b: &str| !a.is_empty() && !b.is_empty() && (a.contains(b) || b.contains(a));
     let mut hits: Vec<(u64, u64)> = Vec::new();
     for song in songs {
         let Some(id) = song.get("id").and_then(Value::as_u64) else { continue };
-        let original = song.get("name").and_then(Value::as_str).unwrap_or_default();
-        let name = original.to_lowercase();
+        let title = song.get("name").and_then(Value::as_str).unwrap_or_default();
         let length = song.get("duration").and_then(Value::as_u64).unwrap_or(0);
-        let off = if duration_ms > 0 && length > 0 { length.abs_diff(duration_ms) } else { 0 };
-        let by_artist = song.get("artists").and_then(Value::as_array).is_some_and(|list| {
-            list.iter().filter_map(|x| x.get("name")?.as_str()).any(|n| artists.iter().any(|a| related(&n.to_lowercase(), a)))
-        });
-        // A live, remix, cover or instrumental recording has other vocals: its lyrics are not this song's.
-        let same_version = names.iter().any(|n| related(&name, &n.title.to_lowercase()) && versions::mismatch(&n.title, original).is_none());
-        if same_version && by_artist && off <= DURATION_TOLERANCE_MS {
+        let artists: Vec<&str> = song.get("artists").and_then(Value::as_array).map(|list| list.iter().filter_map(|x| x.get("name")?.as_str()).collect()).unwrap_or_default();
+        if let Some(off) = same_song(names, title, &artists, length, duration_ms) {
             hits.push((off, id));
         }
     }
     hits.sort_by_key(|&(off, _)| off);
     hits.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Whether a service's song (`title` by `artists`, `length_ms` long, 0 when unknown) is the song playing
+/// under one of its `names`: how far off its length is when it is, None when it is another song.
+pub(crate) fn same_song(names: &[Names], title: &str, artists: &[&str], length_ms: u64, duration_ms: u64) -> Option<u64> {
+    let related = |a: &str, b: &str| !a.is_empty() && !b.is_empty() && (a.contains(b) || b.contains(a));
+    let off = if duration_ms > 0 && length_ms > 0 { length_ms.abs_diff(duration_ms) } else { 0 };
+    let name = title.to_lowercase();
+    let by_artist = artists.iter().any(|x| names.iter().any(|n| related(&x.to_lowercase(), &n.artist.to_lowercase())));
+    // A live, remix, cover or instrumental recording has other vocals: its lyrics are not this song's.
+    let same_version = names.iter().any(|n| related(&name, &n.title.to_lowercase()) && versions::mismatch(&n.title, title).is_none());
+    (same_version && by_artist && off <= DURATION_TOLERANCE_MS).then_some(off)
 }
 
 /// Synced lines from a `song/lyric` response, without the credit header; None for instrumentals.
@@ -162,10 +167,10 @@ fn parse_lyric(body: &str) -> Option<Lyrics> {
         return None;
     }
     let extra = |pointer: &str| v.pointer(pointer).and_then(Value::as_str).map(|t| without_credits(lrc::parse(t))).unwrap_or_default();
-    Some(Lyrics { lines, translation: extra("/tlyric/lyric"), romaji: extra("/romalrc/lyric"), timed: Vec::new(), id: String::new() })
+    Some(Lyrics { lines, translation: lrc::english_only(extra("/tlyric/lyric")), romaji: extra("/romalrc/lyric"), timed: Vec::new(), id: String::new() })
 }
 
-fn without_credits(mut lines: Vec<Line>) -> Vec<Line> {
+pub(crate) fn without_credits(mut lines: Vec<Line>) -> Vec<Line> {
     let credits = lines.iter().take_while(|l| l.at_ms < CREDITS_END_MS && (l.text.contains(" : ") || l.text.contains('：'))).count();
     lines.drain(..credits);
     lines

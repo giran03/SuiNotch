@@ -11,12 +11,12 @@ app). Catalog verdicts are remembered in memory for the session, not on disk. Us
 |---|---|---|
 | Delay | `lyrics::fetch(.., delayed=true)` sleeps 2 s, **then** reads the disk cache | A cached song still waits 2 s before its lyrics appear |
 | Name lookup | `names_for(.., resolve=fallback)` calls Apple's store (iTunes JP) **before** LRCLIB on every Latin-script title | One extra round trip on almost every song, even when LRCLIB has it under the original name |
-| Retries | `1 + lyrics_retries` (default 6) rounds, 1 s apart, for any "nothing found" | A song LRCLIB/NetEase simply don't have costs ~6 × (iTunes + 2 LRCLIB + NetEase search + lyric calls) every time it plays. Network failures and "not found" are treated the same |
+| Retries | `1 + lyrics_retries` (default 6) rounds, 1 s apart, for any "nothing found" | A song LRCLIB and the backup service simply don't have costs ~6 × (iTunes + 2 LRCLIB + backup search + lyric calls) every time it plays. Network failures and "not found" are treated the same |
 | Misses | Nothing is remembered | The same unknown song is searched again every play |
 | HTTP | New `HttpClient` per lookup, no timeout | A stalled request blocks that worker indefinitely |
 | User-Agent | `SuiNotch/1.0 (a living notch for Windows)` | LRCLIB counts clients without a homepage/contact as "generic" (~45 req/min per IP); identified ones get ~90 |
 | Instrumentals | LRCLIB's `instrumental: true` is ignored | Shows "No lyrics found" and keeps retrying |
-| Word timing | Only from NetEase's encrypted endpoint | LRCLIB now returns `lyricsfile` (YAML) with `hasWordSync`; word-level timings for some songs without NetEase |
+| Word timing | Only from a backup service's encrypted endpoint | LRCLIB now returns `lyricsfile` (YAML) with `hasWordSync`; word-level timings for some songs without a backup service |
 | Next track | Nothing | Windows media controls (GSMTC) expose **no queue**, so the next song is unknown |
 | Song gate | Per-player allow-list + `MediaKind::Video` + "Advertisement" title | Podcasts/audiobooks in Spotify, and talk/video in "Automatic" non-browser players, still get searched. Rich SMTC fields (`Genres`, `TrackNumber`, `AlbumArtist`, `AlbumTrackCount`, `Subtitle`) are never read |
 
@@ -58,7 +58,7 @@ then turns a cache *hit* into the normal case.
 5. **One shared client with timeouts.** Add `src/lyrics_net.rs` with:
    - a lazily-built `HttpClient`, reused by every provider;
    - `get(url, timeout)` that calls `.Cancel()` on the WinRT async op after 8 s;
-   - a per-provider minimum gap (LRCLIB 250 ms, NetEase 500 ms) so prefetch bursts stay polite.
+   - a per-provider minimum gap (LRCLIB 250 ms, backup services 500 ms) so prefetch bursts stay polite.
 
    Moving `get`/`check_request` out of `lyrics.rs` also takes that file back under the 800-line ceiling as
    features grow.
@@ -213,14 +213,14 @@ text; catalog duration matching; verdict cache; policy wiring matrix extending `
 ## 5. Phase 4: extra features worth adding
 
 1. **LRCLIB word timing** from `lyricsfile` when `hasWordSync` is true. Parse `lines[].words` into the existing
-   `words::Word`, then vet with `words::vet`. That gives word-by-word lyrics without the NetEase encrypted
+   `words::Word`, then vet with `words::vet`. That gives word-by-word lyrics without the backup service's encrypted
    endpoint, and the extras call is skipped when LRCLIB already has words. The format needs a spike: the docs point
    to the Lyricsfile spec and the LRCGET source.
 2. **Local `.lrc` folder.** Settings → "Lyrics folder". Look for `Artist - Title.lrc`, then `Title.lrc`,
    normalised, before any network call. It is the best source for local libraries and user corrections, works
    offline, and sends nothing.
 3. **"Wrong lyrics" / remember match.** In the panel menu:
-   - *Wrong lyrics* blocklists that LRCLIB id or NetEase id for this track key (`lyrics.json`, next to `Shifts`)
+   - *Wrong lyrics* blocklists that LRCLIB id or backup service id for this track key (`lyrics.json`, next to `Shifts`)
      and searches again;
    - *Keep these* pins the match so the cache is never replaced.
 

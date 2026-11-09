@@ -26,9 +26,22 @@ pub(super) fn section_y(normal_y: f32, lyrics_end: f32, height: f32) -> f32 {
     normal_y.max(TITLE_H).min(lyrics_end - height)
 }
 
+/// Whether the pinned preview, spanning `top..bottom` of the content column, sits under the mouse.
+fn covers_point(top: f32, bottom: f32, x: f32, y: f32) -> bool {
+    x > SIDEBAR && y >= top && y < bottom
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_buttons_are_outside_the_preview() {
+        let (top, bottom) = (TITLE_H - 8.0, TITLE_H + 160.0);
+        assert!(!covers_point(top, bottom, W - 20.0, 17.0));
+        assert!(!covers_point(top, bottom, SIDEBAR - 10.0, 100.0));
+        assert!(covers_point(top, bottom, W - 20.0, 100.0));
+    }
 
     #[test]
     fn preview_stays_in_flow_until_it_reaches_the_top() {
@@ -80,9 +93,14 @@ impl Ui<'_, '_> {
             hit.h = (bottom - hit.y).max(0.0);
             hit.h > 0.0
         });
-        self.s.hover = self.s.hits.iter().rev()
-            .find(|(hit, _)| hit.contains(self.s.mouse.0, self.s.mouse.1))
-            .map(|(_, act)| *act);
+        // Only re-check hover under the preview: the title buttons are added after
+        // the page, so re-checking elsewhere would drop hover (and clicks) on Close.
+        let (mx, my) = self.s.mouse;
+        if covers_point(top, r.bottom(), mx, my) {
+            self.s.hover = self.s.hits.iter().rev()
+                .find(|(hit, _)| hit.contains(mx, my))
+                .map(|(_, act)| *act);
+        }
     }
 
     pub(super) fn lyric_preview(&mut self, c: &Config, r: R) {
@@ -107,6 +125,7 @@ impl Ui<'_, '_> {
                 Fill::Even(((t - 0.4) / (LOOP_S - 1.2)).clamp(0.0, 1.0))
             },
             secs: t,
+            sung_s: SING_MS as f32 / 1000.0,
             art: None,
             accent,
             glass: c.glass,
@@ -117,7 +136,7 @@ impl Ui<'_, '_> {
         self.cv.fill_rrect(R::centered(body.x + 20.0, body.cy(), 14.0, 14.0), 4.0, accent.a(0.8));
         let slot = R::new(body.x + 38.0, body.y, body.w - 38.0 - 40.0, body.h);
         if look.in_notch() {
-            lyric_draw::draw_in_notch(self.cv, slot, &frame);
+            let _ = lyric_draw::draw_in_notch(self.cv, slot, &frame);
         } else {
             self.cv.text("Song title", slot, 12.5, 600, C::WHITE, Align::Left);
         }

@@ -151,6 +151,21 @@ pub struct State {
     pub id: String,
     /// The lyrics on show are kept through later lookups.
     pub pinned: bool,
+    /// The song's length when its lookup began. Players often name the new song a moment before they
+    /// give its length, so the first lookup may go out with the last song's.
+    asked_ms: u64,
+    /// The lookup was made again for the song's right length; it is only made again once.
+    asked_again: bool,
+}
+
+/// A length this much different from the one a lookup was made with means it was made with the wrong
+/// one, as when the player had not yet given the new song's length.
+const LENGTH_CHANGED_MS: u64 = 3000;
+
+/// Whether a song's lookup went out with a length other than its own, now that the player gives
+/// `now_ms`: it is then made again, since the lyrics services match songs by their length.
+fn asked_with_wrong_length(asked_ms: u64, now_ms: u64) -> bool {
+    now_ms > 0 && asked_ms.abs_diff(now_ms) > LENGTH_CHANGED_MS
 }
 
 pub fn clear(app: &mut App) {
@@ -227,6 +242,14 @@ pub fn reconcile(app: &mut App) {
         } else if eligible && info.playing {
             request(app, false, false);
         }
+    } else if !app.lyric_request.manual
+        && !app.lyric_request.pinned
+        && !app.lyric_request.asked_again
+        && asked_with_wrong_length(app.lyric_request.asked_ms, info.duration_ms)
+    {
+        crate::log("lyrics looked up again: the player gave the song's length after its name");
+        app.lyric_request.asked_again = true;
+        request(app, false, false);
     }
 }
 
@@ -264,6 +287,7 @@ pub fn request(app: &mut App, manual: bool, extras: bool) {
     app.lyric_request.started = true;
     app.lyric_request.searching = true;
     app.lyric_request.skipped = None;
+    app.lyric_request.asked_ms = info.duration_ms;
     let skip = app.shifts.blocked(info.track_key());
     app.lyric_request.generation = lyrics::fetch(Request {
         info,
@@ -491,5 +515,15 @@ mod tests {
             .insert("chrome.exe".into(), Policy::Manual);
         let restored: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(cfg.lyrics_sources, restored.lyrics_sources);
+    }
+
+    #[test]
+    fn a_lookup_made_with_the_last_songs_length_is_made_again() {
+        // "JET" (4:45) was named while the player still gave "Jet Lag"'s 3:03.
+        assert!(asked_with_wrong_length(183_080, 285_107));
+        assert!(asked_with_wrong_length(0, 285_107));
+        // The same length, a little rounding, or no length yet is no reason to.
+        assert!(!asked_with_wrong_length(285_107, 285_000));
+        assert!(!asked_with_wrong_length(285_107, 0));
     }
 }

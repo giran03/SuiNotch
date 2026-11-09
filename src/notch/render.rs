@@ -280,6 +280,10 @@ pub(super) fn next_frame_ms(app: &App, eq: bool, mascot: bool) -> u64 {
             if n.expanded && n.lyrics_view && n.page == Page::Music && app.cfg.wants_word_timing() {
                 next = next.min(33);
             }
+            // A long title going round, or a long line scrolling, in the closed notch.
+            if n.marquee && !n.expanded {
+                next = next.min(33);
+            }
             if n.pill_alpha.target > 0.5 {
                 let look = app.cfg.lyric_look();
                 if look.karaoke || (look.fit == crate::lyric_style::Fit::Scroll && n.pill_overflow) {

@@ -38,14 +38,23 @@ pub const ROOM_MAX: f32 = 50.0 + ROOM_PAD;
 pub const MAX_LINE_W: f32 = 560.0;
 /// A last line, with no next line to measure by, fills over this long.
 const LAST_LINE_MS: u64 = 5000;
-/// Time a line takes to sing per character, for the karaoke fill; it stops there rather than creeping through a break.
-const SING_MS_PER_CHAR: u64 = 65;
+/// Time a line takes to sing per sound (a syllable, or a kana or Chinese character), for the karaoke
+/// fill; it stops there rather than creeping through a break. Sung lines run at about 4 to 5 sounds a
+/// second in both English and Japanese, where a character count would rush a Japanese line.
+const SING_MS_PER_SOUND: u64 = 220;
 const MIN_SING_MS: u64 = 1200;
 /// How far a line may shrink before it is cut instead.
 const MIN_SHRINK: f32 = 0.7;
-/// How fast a long line scrolls, in dips per second, and how long it rests at each end.
+/// How fast a long line scrolls at least, in dips per second, and how long it rests at its start.
 const SCROLL_SPEED: f32 = 40.0;
 const SCROLL_HOLD_S: f32 = 1.2;
+/// How long before the line is sung a scrolling line reaches its end, so its last words can be read.
+const SCROLL_END_EARLY_S: f32 = 0.4;
+/// How fast a long song title goes round, in dips per second, and how long it rests at its start.
+const MARQUEE_SPEED: f32 = 30.0;
+const MARQUEE_HOLD_S: f32 = 2.0;
+/// Space between the end of a song title going round and its start following it.
+pub const MARQUEE_GAP: f32 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
@@ -259,15 +268,15 @@ pub fn progress(lines: &[Line], i: usize, pos_ms: u64) -> f32 {
     (pos_ms.saturating_sub(line.at_ms) as f32 / sing as f32).clamp(0.0, 1.0)
 }
 
-/// How long line `i` takes to sing, judged from its length, and no longer than the time until the next
-/// line; 0 for a line that is gone before it starts.
+/// How long line `i` takes to sing, judged from how many sounds it has, and no longer than the time
+/// until the next line; 0 for a line that is gone before it starts.
 pub fn sing_ms(lines: &[Line], i: usize) -> u64 {
     let Some(line) = lines.get(i) else { return 0 };
     let span = match lines.get(i + 1) {
         Some(next) => next.at_ms.saturating_sub(line.at_ms),
         None => LAST_LINE_MS,
     };
-    (line.text.chars().count() as u64 * SING_MS_PER_CHAR).max(MIN_SING_MS).min(span)
+    (crate::words::sounds(&line.text) as u64 * SING_MS_PER_SOUND).max(MIN_SING_MS).min(span)
 }
 
 /// The first `n` characters of `text`.
@@ -286,24 +295,33 @@ pub fn shrink_scale(text_w: f32, avail: f32, fit: Fit) -> f32 {
     (avail / text_w).clamp(MIN_SHRINK, 1.0)
 }
 
-/// How far a line that overflows by `overflow` dips has scrolled `secs` after it appeared: it rests,
-/// scrolls to its end, rests and scrolls back, over and over.
-pub fn scroll_offset(overflow: f32, secs: f32) -> f32 {
+/// How far a line that overflows by `overflow` dips has scrolled `secs` after it appeared: it rests at
+/// its start, scrolls to its end once and stays there. It keeps pace with the singing, speeding up so
+/// it reaches its end by the time the line has been sung (`sung_s`), but never moves slower than usual.
+pub fn scroll_offset(overflow: f32, secs: f32, sung_s: f32) -> f32 {
     if overflow <= 0.0 {
         return 0.0;
     }
-    let travel = overflow / SCROLL_SPEED;
-    let cycle = 2.0 * (SCROLL_HOLD_S + travel);
-    let t = secs.max(0.0) % cycle;
-    if t < SCROLL_HOLD_S {
-        0.0
-    } else if t < SCROLL_HOLD_S + travel {
-        (t - SCROLL_HOLD_S) / travel * overflow
-    } else if t < 2.0 * SCROLL_HOLD_S + travel {
-        overflow
-    } else {
-        (1.0 - (t - 2.0 * SCROLL_HOLD_S - travel) / travel) * overflow
+    let hold = SCROLL_HOLD_S.min(sung_s / 4.0).max(0.0);
+    let window = sung_s - hold - SCROLL_END_EARLY_S;
+    let speed = if window > 0.0 { (overflow / window).max(SCROLL_SPEED) } else { SCROLL_SPEED };
+    ((secs - hold).max(0.0) * speed).min(overflow)
+}
+
+/// Whether a line that overflows by `overflow` is still on its way to its end `secs` after it appeared.
+pub fn still_scrolling(overflow: f32, secs: f32, sung_s: f32) -> bool {
+    overflow > 0.0 && scroll_offset(overflow, secs, sung_s) < overflow
+}
+
+/// How far a text that goes round and round has moved `secs` after it appeared: it rests at its start,
+/// moves left by one `lap` (its width and the gap after it), where its start has come round again,
+/// and begins over.
+pub fn marquee_offset(lap: f32, secs: f32) -> f32 {
+    if lap <= 0.0 {
+        return 0.0;
     }
+    let t = secs.max(0.0) % (MARQUEE_HOLD_S + lap / MARQUEE_SPEED);
+    ((t - MARQUEE_HOLD_S).max(0.0) * MARQUEE_SPEED).min(lap)
 }
 
 /// The part of `text` a typewriter has typed when it is `f` (0 to 1) of the way through.
@@ -438,14 +456,38 @@ mod tests {
     }
 
     #[test]
-    fn a_long_line_scrolls_to_its_end_and_back() {
-        assert_eq!(scroll_offset(0.0, 3.0), 0.0);
-        assert_eq!(scroll_offset(80.0, 0.5), 0.0);
-        let mid = scroll_offset(80.0, SCROLL_HOLD_S + 1.0);
+    fn a_long_line_scrolls_to_its_end_once_and_stays() {
+        assert_eq!(scroll_offset(0.0, 3.0, 10.0), 0.0);
+        assert_eq!(scroll_offset(80.0, 0.5, 10.0), 0.0);
+        let mid = scroll_offset(80.0, SCROLL_HOLD_S + 1.0, 10.0);
         assert!(mid > 0.0 && mid < 80.0);
-        assert_eq!(scroll_offset(80.0, SCROLL_HOLD_S + 2.0 + 0.5), 80.0);
-        let cycle = 2.0 * (SCROLL_HOLD_S + 2.0);
-        assert!(scroll_offset(80.0, cycle - 0.1) < 80.0 / 4.0);
+        // At the usual speed when the line is sung slowly, and it stays at its end.
+        assert_eq!(scroll_offset(80.0, SCROLL_HOLD_S + 2.0, 10.0), 80.0);
+        assert_eq!(scroll_offset(80.0, 60.0, 10.0), 80.0);
+        assert!(still_scrolling(80.0, SCROLL_HOLD_S + 1.0, 10.0));
+        assert!(!still_scrolling(80.0, 60.0, 10.0));
+        assert!(!still_scrolling(0.0, 1.0, 10.0));
+    }
+
+    #[test]
+    fn a_long_line_sung_quickly_scrolls_faster_to_finish_in_time() {
+        // 400 dips at the usual 40 a second would take 10 s; the line is sung in 3 s.
+        let end = 3.0 - SCROLL_END_EARLY_S;
+        assert!((scroll_offset(400.0, end, 3.0) - 400.0).abs() < 0.01);
+        assert!(scroll_offset(400.0, end - 0.5, 3.0) < 400.0);
+    }
+
+    #[test]
+    fn a_long_title_goes_round_with_a_rest_at_its_start() {
+        let lap = 300.0;
+        assert_eq!(marquee_offset(lap, 0.0), 0.0);
+        assert_eq!(marquee_offset(lap, MARQUEE_HOLD_S), 0.0);
+        let one_lap = MARQUEE_HOLD_S + lap / MARQUEE_SPEED;
+        let half = marquee_offset(lap, MARQUEE_HOLD_S + lap / MARQUEE_SPEED / 2.0);
+        assert!((half - lap / 2.0).abs() < 0.01);
+        // Round again: back at the start, resting.
+        assert!(marquee_offset(lap, one_lap + 0.1) < 0.01);
+        assert_eq!(marquee_offset(0.0, 5.0), 0.0);
     }
 
     #[test]
@@ -468,6 +510,16 @@ mod tests {
         assert_eq!(first_chars("ab", 0), "");
         assert_eq!(sing_ms(&lines(), 0), MIN_SING_MS);
         assert_eq!(sing_ms(&lines(), 9), 0);
+    }
+
+    #[test]
+    fn japanese_lines_are_given_the_time_their_sounds_take() {
+        // 14 characters, 13 sounds: sung over about 3 s, not rushed through in 1.2 s.
+        let l = vec![Line { at_ms: 0, text: "有無も言えずに うらめしいや".into() }, Line { at_ms: 3220, text: "x".into() }];
+        assert_eq!(sing_ms(&l, 0), 13 * SING_MS_PER_SOUND);
+        let en = vec![Line { at_ms: 0, text: "I've been on my own for long enough".into() }, Line { at_ms: 9000, text: "x".into() }];
+        // I've·been·on·my·own·for·long·e·nough
+        assert_eq!(sing_ms(&en, 0), 9 * SING_MS_PER_SOUND);
     }
 
     #[test]

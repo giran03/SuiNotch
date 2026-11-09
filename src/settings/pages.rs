@@ -198,7 +198,7 @@ impl Ui<'_, '_> {
         self.section("Privacy");
         let r = self.card(&[ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB, ROW_SUB]);
         self.button(r[0], "Lyrics come from LRCLIB", Some("Only the song title, artist, album and length are sent"), "lrclib.net", Act::Website, false);
-        self.toggle(c, r[1], "Fall back to other services", Some("Backup lyrics, extras, song checks and album track lists. Sends title and artist to NetEase and Apple"), |c| &mut c.lyrics_fallback);
+        self.toggle(c, r[1], "Fall back to other services", Some("Backup lyrics, extras, song checks and album track lists. Sends title and artist to other lyrics services and Apple"), |c| &mut c.lyrics_fallback);
         self.toggle(c, r[2], "Keep lyrics on this PC", Some("A song already looked up shows at once, even offline. Songs with none are remembered for 3 days"), |c| &mut c.lyrics_cache);
         self.button(r[3], "Clear saved lyrics", Some("Removes the lyrics kept on this PC; they are fetched again when needed"), "Clear", Act::ClearLyricsCache, true);
         self.button(r[4], "Your own lyric files", Some("Put .lrc or .txt files named \"Artist - Title\" here; they come first and send nothing"), "Open folder", Act::OpenLyricsFolder, false);
@@ -244,7 +244,7 @@ impl Ui<'_, '_> {
         let yes = |b: bool| if b { "yes" } else { "no" };
         let note = match extras {
             Some((translation, romaji)) => format!("Under the line, or after it in the notch. This song: translation {}, romaji {}", yes(translation), yes(romaji)),
-            None => "Under the line, or after it in the notch. Romaji and translations come from NetEase, for songs that have them".to_string(),
+            None => "Under the line, or after it in the notch. Romaji and translations come from other lyrics services, for songs that have them".to_string(),
         };
         self.dimmed(off, |ui| ui.seg_row(c, r[0], "Second line", Some(&note), &ls::SECOND_LABELS, |c| &mut c.lyrics_second));
         self.seg_row(c, r[1], "Under each line in the panel", Some("Romaji or a translation in the open lyrics panel; its Aあ button switches it too"), &ls::PANEL_ALT_LABELS, |c| &mut c.lyrics_panel_alt);

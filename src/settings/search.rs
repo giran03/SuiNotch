@@ -79,7 +79,7 @@ pub(super) const INDEX: &[Entry] = &[
     e(3, "Artwork glow", "cover album tint colour"),
     e(3, "Show player name", "spotify apple music source"),
     e(3, "Lyrics come from LRCLIB", "privacy source service"),
-    e(3, "Fall back to other services", "privacy source service backup netease apple"),
+    e(3, "Fall back to other services", "privacy source service backup lyrics apple"),
     e(3, "Keep lyrics on this PC", "cache offline save disk"),
     e(3, "Clear saved lyrics", "cache delete remove"),
     e(ABOUT_PAGE, "Reset all settings", "default factory restore fresh"),

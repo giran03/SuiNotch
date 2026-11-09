@@ -19,7 +19,7 @@ SuiNotch makes only these network requests:
 | Service | When | What is sent |
 |---|---|---|
 | [LRCLIB](https://lrclib.net) | After likely song playback remains eligible for two seconds, or when you request a manual search; respects per-player preferences and Lyrics Off. With Fetch the next song's lyrics ahead (on by default), also for the song likely to play next, at most 30 times an hour and never on a metered connection | The song's title, artist, album and length, to look up synced lyrics |
-| [NetEase Cloud Music](https://music.163.com) | Only with Fall back to other services (on by default): when LRCLIB has no synced lyrics, or for romaji, translations and word timing you chose to show | The song's title and artist |
+| Backup lyrics services (two music services' lyrics search) | Only with Fall back to other services (on by default): when LRCLIB has no synced lyrics, or for romaji, translations and word timing you chose to show | The song's title, artist and length |
 | [Apple's music store search](https://itunes.apple.com) | Only with Fall back to other services: to find a song's native-script name, to check that a track from a player not made for music is a song before its lyrics are looked up, and to find the next track of an album for fetching ahead | The song's title, artist and album |
 | [GitHub](https://github.com/giran03/SuiNotch/releases) | Checking for updates | A request for the latest release; an installer is downloaded only when a newer version exists |
 | Your calendar provider | Only if you add a calendar link, every 15 minutes | A request for that calendar, to the address you pasted |

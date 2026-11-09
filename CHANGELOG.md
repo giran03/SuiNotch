@@ -2,6 +2,28 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.7] - 2026-11-09
+
+### Added
+- Another backup lyrics service under Fall back to other services. Its lyrics time every word, so many more songs get a word highlight that follows the singer instead of an estimate, and songs missing elsewhere can still be found. It is sent the song's title, artist and length.
+- A song title too long for the closed notch goes round while the music plays, its start following its end after a short gap.
+- A lyric line too long for the notch scrolls through once, with its romaji or translation after it, in time with the singing, instead of being cut off or leaving the romaji out.
+
+### Changed
+- The Scroll fit for long lines scrolls to the end once, in time with the singing, instead of going back and forth.
+- Romaji reads as words ("anata ga suki") instead of one syllable at a time ("a na ta ga su ki").
+- Only English translations are shown. Translations into other languages are left out, and romaji still shows.
+- The backup lyrics services are no longer named in the app; lyrics from them are labelled "Backup service".
+- The word highlight follows the singer exactly on lyrics with word-by-word timing in the lyrics themselves (enhanced LRC), from LRCLIB or your own .lrc files, instead of estimating it from the text.
+
+### Fixed
+- A song with an English title is no longer searched for under another song's Japanese name. A Japanese title from Apple's store is only used when Apple's English name for that same track is the song's title, by the same artist ("JET" was being searched as ジェット・ラグ, "Jet Lag").
+- Lyrics are looked up again when the player gives a song's length a moment after its name. The first search went out with the previous song's length, which could match a different song.
+- Romaji and translations from another song with a similar name ("JET" showing "Jet Lag"'s romaji) are no longer shown: they are only taken when the backup service's lyrics are the same as the ones shown, and each sits under the line with the same words instead of the line at about the same time. Songs already saved are looked up again.
+- Lyrics with word-by-word timing (enhanced LRC) no longer show raw timestamps such as `<01:54.955>` in the middle of a line.
+- The Settings window's close and minimize buttons work again on the Music and lyrics page.
+- The word highlight no longer rushes to the end of some Japanese, Chinese and Korean lines. Word timing now fits far more of their lines (kanji written two ways, lines broken differently between services), and lines without it are paced by their syllables instead of their letters. Songs already saved are looked up again for the better timing.
+
 ## [1.0.6] - 2026-11-08
 
 ### Added
@@ -39,7 +61,7 @@ All notable changes to SuiNotch. Newest first.
 - Your own lyric files: put .lrc or .txt files named "Artist - Title" in the new lyrics folder (Settings > Music and lyrics > Your own lyric files) and they are used first, offline.
 - Wrong lyrics and Keep buttons in the lyrics tool bar. Wrong lyrics are never offered for that song again; kept lyrics stay whatever later searches find.
 - Instrumental tracks say "Instrumental" instead of "No lyrics found".
-- Word-by-word timing from LRCLIB for songs that have it, without asking NetEase.
+- Word-by-word timing from LRCLIB for songs that have it, without asking a backup service.
 - Diagnostics lists the last lyric lookups and the song check for the track playing.
 - A temporary Updates tab appears when an update is available. Download and verify the update, then install and restart when ready. The tab shows downloading, ready, installing and retry states and hides after completion.
 
@@ -48,7 +70,7 @@ All notable changes to SuiNotch. Newest first.
 - When the network comes back, a song whose lyrics could not be fetched is searched again.
 
 ### Fixed
-- The privacy notes now list NetEase and Apple's store, which the lyrics fallback (on by default) contacts.
+- The privacy notes now list the backup lyrics services and Apple's store, which the lyrics fallback (on by default) contacts.
 - Cycling lyric placement or Off/On preserves already-found lyrics and their translations/word timing for the current song. Browser sources require an explicit lyric search, including those with an older Automatic preference; toggling display options never starts a browser search.
 - The notch restores its always-on-top position after switching windows, reappearing or resuming, without taking keyboard focus. A lightweight recovery check also handles apps that restack later, while preserving full-screen hiding.
 - Sound previews change only the clicked Play button to Stop, even when several reminders use the same sound.

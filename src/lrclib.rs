@@ -194,6 +194,9 @@ pub fn record(v: &Value, duration_ms: u64) -> Option<Record> {
                     f.words = kept(&f.lines, words::attach(&f.lines, &lyricsfile::timed_lines(doc)), duration_ms);
                 }
             }
+            if !f.has_words() {
+                f.words = crate::lyrics::lrc_words(&f.lines, synced, duration_ms);
+            }
             return Some(Record::Lyrics(f));
         }
     }
