@@ -1,6 +1,6 @@
 //! System tray icon and its menu. The icon is drawn at runtime from the SuiNotch mark.
 
-use windows::core::{w, Interface, Result};
+use windows::core::{Interface, Result};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::ID2D1RenderTarget;
 use windows::Win32::Graphics::Gdi::*;
@@ -11,6 +11,7 @@ use crate::app::{self, App, Deferred};
 use crate::events::WM_APP_TRAY;
 use crate::gfx::{self, Canvas, Gfx, C, R};
 use crate::mascot;
+use crate::notch::context_menu::TrayItem;
 
 const ID_SETTINGS: u16 = 10;
 const ID_STARTUP: u16 = 11;
@@ -137,25 +138,29 @@ pub fn on_message(app: &mut App, lparam: LPARAM) {
     }
 }
 
-fn show_menu(app: &App) {
-    unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS as usize, w!("Settings..."));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING | check(app.cfg.start_with_windows), ID_STARTUP as usize, w!("Start with Windows"));
-        let _ = AppendMenuW(menu, MF_STRING | check(app.cfg.mascot), ID_MASCOT as usize, w!("Sui mascot"));
-        let _ = AppendMenuW(menu, MF_STRING | check(app.cfg.minimal), ID_MINIMAL as usize, w!("Minimal notch"));
-        let _ = AppendMenuW(menu, MF_STRING | check(app.cfg.hide_fullscreen), ID_HIDE_FS as usize, w!("Hide in full screen"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, ID_ABOUT as usize, w!("About SuiNotch"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit"));
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let _ = SetForegroundWindow(app.notch.hwnd);
-        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, Some(0), app.notch.hwnd, None);
-        let _ = DestroyMenu(menu);
-    }
+/// The styled menu runs a modal loop, so it opens once the app is no longer borrowed.
+fn show_menu(_app: &App) {
+    let mut pt = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut pt); }
+    app::defer(Deferred::TrayMenu(pt));
+}
+
+pub fn open_menu(point: POINT) {
+    let Some(state) = app::with(|app| (app.cfg.start_with_windows, app.cfg.mascot, app.cfg.minimal, app.cfg.hide_fullscreen)) else { return };
+    let item = |id, label, icon, checked, danger| TrayItem { id, label, icon, checked, danger, separator: false };
+    let divider = || TrayItem { id: 0, label: "", icon: ' ', checked: false, danger: false, separator: true };
+    let items = vec![
+        item(ID_SETTINGS, "Settings", gfx::icon::SETTINGS, false, false),
+        divider(),
+        item(ID_STARTUP, "Start with Windows", gfx::icon::POWER, state.0, false),
+        item(ID_MASCOT, "Sui mascot", gfx::icon::IMAGE, state.1, false),
+        item(ID_MINIMAL, "Minimal notch", gfx::icon::DISPLAY, state.2, false),
+        item(ID_HIDE_FS, "Hide in full screen", gfx::icon::SWITCH, state.3, false),
+        divider(),
+        item(ID_ABOUT, "About SuiNotch", gfx::icon::INFO, false, false),
+        item(ID_EXIT, "Exit", gfx::icon::CLOSE, false, true),
+    ];
+    crate::notch::context_menu::show_tray(items, point);
 }
 
 pub fn on_command(app: &mut App, id: u16) {

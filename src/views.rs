@@ -19,6 +19,11 @@ pub fn accent(app: &App) -> C {
     C::hex(app.cfg.accent_rgb())
 }
 
+/// The notch body's fill. Menus share it (opaque) so they always follow the Glass setting.
+pub fn surface(app: &App) -> C {
+    if app.cfg.glass { C(0.05, 0.055, 0.07, 0.88) } else { C::BLACK }
+}
+
 pub fn hit(app: &mut App, r: R, h: Hit) {
     app.notch.hits.push((r, h));
 }
@@ -155,8 +160,7 @@ pub fn draw_notch(cv: &mut Canvas, app: &mut App) {
         cv.fill_rect(R::new(body.x - notch::FLARE, -gap, body.w + 2.0 * notch::FLARE, gap + 1.0), C::BLACK.a(0.006));
     }
     let Some(path) = notch::outline(cv, body, radius, style) else { return };
-    let fill = if app.cfg.glass { C(0.05, 0.055, 0.07, 0.88) } else { C::BLACK };
-    cv.fill_path(&path, fill);
+    cv.fill_path(&path, surface(app));
     if app.cfg.glass {
         cv.stroke_path(&path, C::WHITE.a(0.09), 1.0);
     }

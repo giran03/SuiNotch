@@ -3,7 +3,7 @@
 use super::*;
 use crate::lyric_style::LyricsMode;
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_MENU, ODS_DISABLED, ODS_GRAYED, ODS_SELECTED, ODS_CHECKED};
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_MENU, ODS_DISABLED, ODS_GRAYED, ODS_SELECTED, ODS_HOTLIGHT, ODS_CHECKED};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
@@ -13,6 +13,14 @@ struct Row {
     label: String,
     mode: Option<LyricsMode>,
     icon: Option<char>,
+    separator: bool,
+    danger: bool,
+}
+
+impl Row {
+    fn plain(label: impl Into<String>, mode: Option<LyricsMode>, icon: Option<char>) -> Self {
+        Row { label: label.into(), mode, icon, separator: false, danger: false }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,7 +53,11 @@ fn shape_popup(hwnd: HWND, radius: i32, inset: i32) {
         let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
         if width <= 2 * inset || height <= 2 * inset { return; }
         let signature = FrameShape { hwnd: hwnd.0 as isize, size: (width, height), radius, inset };
-        if FRAME_SHAPED.with(|f| f.get() == Some(signature)) { return; }
+        // Windows can replace a menu's region when it repositions or shows it, so ask the window
+        // instead of trusting a cached flag.
+        let mut current = RECT::default();
+        let have_region = GetWindowRgnBox(hwnd, &mut current).0 != 0;
+        if have_region && current.left == inset && current.top == inset && current.right == width - inset && current.bottom == height - inset { return; }
         // DWM borders/corners are independent of the menu's own one-pixel frame.
         let none = DWMWA_COLOR_NONE;
         let corner = DWMWCP_DONOTROUND;
@@ -53,7 +65,10 @@ fn shape_popup(hwnd: HWND, radius: i32, inset: i32) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as _, 4);
         let region = frame_region(width, height, radius, inset);
         if !region.is_invalid() {
-            if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            // No forced repaint: this runs from inside row drawing, and repainting there would
+            // restart the drawing and wipe the hover highlight.
+            if SetWindowRgn(hwnd, Some(region), false) == 0 {
+                crate::log("menu frame: SetWindowRgn failed");
                 let _ = DeleteObject(region.into());
             } else {
                 FRAME_SHAPED.with(|f| f.set(Some(signature)));
@@ -61,6 +76,17 @@ fn shape_popup(hwnd: HWND, radius: i32, inset: i32) {
         }
         // On success Windows owns the region and releases it with the popup window.
     }
+}
+
+unsafe extern "system" fn shape_enum(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
+    let (radius, inset) = FRAME.with(|f| f.get());
+    shape_popup(hwnd, radius, inset);
+    windows::core::BOOL(1)
+}
+
+/// Finds this thread's open menu windows directly, whatever DC or event reached us.
+fn shape_open_popups() {
+    unsafe { let _ = EnumThreadWindows(GetCurrentThreadId(), Some(shape_enum), LPARAM(0)); }
 }
 
 pub(super) fn idle_popup(hwnd: HWND) {
@@ -83,12 +109,14 @@ impl Drop for PopupHook {
 }
 
 fn background(app: &App) -> C {
-    if app.cfg.glass { C::hex(0x0D0E12) } else { C::BLACK }
+    // The Settings window's surface, fully opaque: menus never show what is behind them.
+    let _ = app;
+    crate::settings::menu_surface()
 }
 
 /// Keep native menu navigation and dismissal, while drawing with the notch's own renderer.
 fn theme(menu: HMENU, rows: Vec<Row>, app: &App) -> HBRUSH {
-    let radius = if app.cfg.style() == NotchStyle::Flat { 0.0 } else { 13.0 * app.cfg.roundness() };
+    let radius = crate::settings::menu_corner_dip(app.cfg.roundness);
     FRAME.with(|f| f.set(((radius * app.notch.scale).round() as i32, app.notch.scale.ceil().max(1.0) as i32)));
     FRAME_SHAPED.with(|f| f.set(None));
     let color = background(app);
@@ -97,8 +125,9 @@ fn theme(menu: HMENU, rows: Vec<Row>, app: &App) -> HBRUSH {
         let brush = CreateSolidBrush(rgb);
         let info = MENUINFO { cbSize: std::mem::size_of::<MENUINFO>() as u32, fMask: MIM_BACKGROUND | MIM_STYLE, hbrBack: brush, dwStyle: MNS_NOCHECK, ..Default::default() };
         let _ = SetMenuInfo(menu, &info);
-        for index in 0..rows.len() {
-            let info = MENUITEMINFOW { cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_FTYPE | MIIM_DATA, fType: MFT_OWNERDRAW, dwItemData: index + 1, ..Default::default() };
+        for (index, row) in rows.iter().enumerate() {
+            let kind = if row.separator { MFT_OWNERDRAW | MFT_SEPARATOR } else { MFT_OWNERDRAW };
+            let info = MENUITEMINFOW { cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_FTYPE | MIIM_DATA, fType: kind, dwItemData: index + 1, ..Default::default() };
             let _ = SetMenuItemInfoW(menu, index as u32, true, &info);
         }
         PRESENTATION.with(|p| *p.borrow_mut() = Some((menu, rows)));
@@ -116,19 +145,45 @@ pub(super) fn measure(app: &App, lparam: LPARAM) -> bool {
         if item.itemData == 0 || item.itemData > rows.len() { return false; }
         let width = rows.iter().map(|row| app.gfx.text_width(&row.label, 12.0, 500) + 80.0).fold(180.0_f32, f32::max).min(440.0);
         item.itemWidth = (width * app.notch.scale).ceil() as u32;
-        item.itemHeight = (34.0 * app.notch.scale).ceil() as u32;
+        let height = if rows[item.itemData - 1].separator { SEPARATOR_HEIGHT } else { ROW_HEIGHT };
+        item.itemHeight = (height * app.notch.scale).ceil() as u32;
         true
     })
+}
+
+thread_local! {
+    static SEEN_STATES: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Diagnostics: record each distinct item state Windows reports, once per process.
+fn log_new_state(state: u32) {
+    let fresh = SEEN_STATES.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.contains(&state) { false } else { s.push(state); true }
+    });
+    if fresh { crate::log(&format!("menu item state 0x{state:x}")); }
 }
 
 fn paint_row(cv: &Canvas, app: &App, row: &Row, area: R, selected: bool, checked: bool, disabled: bool) {
     let accent = views::accent(app);
     cv.clear(background(app));
-    if selected && !disabled {
-        cv.fill_rrect(area.inset(4.0, 2.0), (6.0 * app.cfg.roundness()).min(12.0), accent.a(0.18));
+    if row.separator {
+        cv.fill_rrect(R::new(14.0, area.cy() - 0.5, area.w - 28.0, 1.0), 0.5, views::FAINT);
+        return;
     }
-    let ink = if disabled { views::DIM } else { C::WHITE.a(0.92) };
-    let icon_color = if checked && !disabled { accent } else { ink };
+    let danger = C::hex(0xFF6B6B);
+    let hot = selected && !disabled;
+    if hot {
+        // Hover: soft rounded pill in the accent (red for Exit) with a thin accent bar on the left.
+        let tint = if row.danger { danger } else { accent };
+        let pill = area.inset(5.0, 2.0);
+        let radius = (6.0 * app.cfg.roundness()).min(12.0);
+        cv.fill_rrect(pill, radius, C::WHITE.a(0.05));
+        cv.fill_rrect(pill, radius, tint.a(0.20));
+        cv.fill_rrect(R::new(pill.x + 1.5, pill.y + 8.0, 3.0, pill.h - 16.0), 1.5, tint);
+    }
+    let ink = if disabled { views::DIM } else if row.danger { danger } else if hot { C::WHITE } else { C::WHITE.a(0.88) };
+    let icon_color = if (checked || hot) && !disabled && !row.danger { accent } else { ink };
     if let Some(mode) = row.mode {
         views::lyrics_mode_glyph(cv, 22.0, area.cy(), 13.0, icon_color, mode);
     } else if let Some(icon) = row.icon {
@@ -151,6 +206,8 @@ pub(super) fn draw(app: &App, lparam: LPARAM) -> bool {
         let Some((menu, rows)) = p.as_ref() else { return false };
         if item.hwndItem.0 != menu.0 { return false; }
         let Some(row) = item.itemData.checked_sub(1).and_then(|i| rows.get(i)) else { return false };
+        // Shape the frame from here too: the popup-start hook can miss, leaving a native border.
+        shape_open_popups();
         let rendered = (|| -> Result<()> {
             let rt = gfx::dc_render_target(&app.gfx)?;
             unsafe {
@@ -160,13 +217,17 @@ pub(super) fn draw(app: &App, lparam: LPARAM) -> bool {
             }
             let cv = Canvas::new(&app.gfx, rt.cast()?)?;
             let area = R::new(0.0, 0.0, (item.rcItem.right - item.rcItem.left) as f32 / app.notch.scale, (item.rcItem.bottom - item.rcItem.top) as f32 / app.notch.scale);
-            paint_row(&cv, app, row, area, item.itemState.0 & ODS_SELECTED.0 != 0, item.itemState.0 & ODS_CHECKED.0 != 0, item.itemState.0 & (ODS_DISABLED.0 | ODS_GRAYED.0) != 0);
+            log_new_state(item.itemState.0);
+            paint_row(&cv, app, row, area, item.itemState.0 & (ODS_SELECTED.0 | ODS_HOTLIGHT.0) != 0,item.itemState.0 & ODS_CHECKED.0 != 0, item.itemState.0 & (ODS_DISABLED.0 | ODS_GRAYED.0) != 0);
             unsafe { rt.EndDraw(None, None) }
         })();
         if let Err(error) = rendered { crate::log(&format!("music menu drawing failed: {error}")); }
         true
     })
 }
+
+const ROW_HEIGHT: f32 = 34.0;
+const SEPARATOR_HEIGHT: f32 = 9.0;
 
 const MODES: [(LyricsMode, &str); 5] = [
     (LyricsMode::Auto, "Auto"),
@@ -208,6 +269,59 @@ pub(super) fn lyrics_menu(current: LyricsMode) -> Result<HMENU> {
     Ok(menu)
 }
 
+/// Themes `menu`, runs it modally and returns the chosen command id (0 when dismissed).
+fn track(menu: HMENU, rows: Vec<Row>, hwnd: HWND, point: POINT, flags: TRACK_POPUP_MENU_FLAGS) -> usize {
+    let brush = app::with(|app| theme(menu, rows, app)).unwrap_or_default();
+    // Scope the hook to this thread/process and only this popup's modal lifetime.
+    let hook = PopupHook(unsafe { SetWinEventHook(EVENT_SYSTEM_MENUPOPUPSTART, EVENT_SYSTEM_MENUPOPUPSTART, None, Some(popup_started), GetCurrentProcessId(), GetCurrentThreadId(), WINEVENT_OUTOFCONTEXT) });
+    let chosen = unsafe {
+        let _ = SetForegroundWindow(hwnd);
+        let chosen = TrackPopupMenu(menu, flags, point.x, point.y, Some(0), hwnd, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        PRESENTATION.with(|p| *p.borrow_mut() = None);
+        let _ = DeleteObject(brush.into());
+        chosen
+    };
+    drop(hook);
+    chosen
+}
+
+/// One entry of the tray menu; `id` 0 with `separator` draws a divider.
+pub(crate) struct TrayItem {
+    pub id: u16,
+    pub label: &'static str,
+    pub icon: char,
+    pub checked: bool,
+    pub danger: bool,
+    pub separator: bool,
+}
+
+/// The tray icon's right-click menu, drawn with the notch's theme and opened at the cursor,
+/// growing away from the taskbar edge.
+pub(crate) fn show_tray(items: Vec<TrayItem>, point: POINT) {
+    let Some(hwnd) = app::with(|app| app.notch.hwnd) else { return };
+    let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
+    let mut rows = Vec::with_capacity(items.len());
+    for item in &items {
+        if item.separator {
+            unsafe { let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None); }
+            rows.push(Row { separator: true, ..Row::plain("", None, None) });
+        } else {
+            append(menu, item.id as usize, item.label, item.checked);
+            rows.push(Row { danger: item.danger, ..Row::plain(item.label, None, Some(item.icon)) });
+        }
+    }
+    // Anchor to the taskbar edge: open upward when the cursor is in the lower half of its monitor.
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let upward = unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } && point.y > (info.rcMonitor.top + info.rcMonitor.bottom) / 2;
+    let flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | if upward { TPM_BOTTOMALIGN } else { TPM_TOPALIGN };
+    let chosen = track(menu, rows, hwnd, point, flags);
+    if chosen > 0 {
+        app::with(|app| crate::tray::on_command(app, chosen as u16));
+    }
+}
+
 pub(crate) fn show(hit: Hit, point: POINT) {
     let Some((hwnd, mode)) = app::with(|app| (app.notch.hwnd, app.cfg.lyrics_mode())) else { return };
     let sources = if hit == Hit::Source { crate::media::source_choices() } else { Vec::new() };
@@ -239,32 +353,21 @@ pub(crate) fn show(hit: Hit, point: POINT) {
     };
     if let Ok(menu) = menu {
         let rows = if hit == Hit::LyricsToggle {
-            MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode), icon: None }).collect()
+            MODES.iter().map(|(mode, label)| Row::plain(*label, Some(*mode), None)).collect()
         } else if hit == Hit::Source {
             if sources.is_empty() {
-                vec![Row { label: "No audio sources available".into(), mode: None, icon: Some(gfx::icon::MUSIC) }]
+                vec![Row::plain("No audio sources available", None, Some(gfx::icon::MUSIC))]
             } else {
-                sources.iter().map(|choice| Row { label: choice.label.clone(), mode: None, icon: Some(gfx::icon::MUSIC) }).collect()
+                sources.iter().map(|choice| Row::plain(choice.label.clone(), None, Some(gfx::icon::MUSIC))).collect()
             }
         } else {
             if vol_sources.is_empty() {
-                vec![Row { label: "No audio outputs or apps available".into(), mode: None, icon: Some(gfx::icon::VOLUME) }]
+                vec![Row::plain("No audio outputs or apps available", None, Some(gfx::icon::VOLUME))]
             } else {
-                vol_sources.iter().map(|choice| Row { label: choice.label.clone(), mode: None, icon: Some(choice.icon) }).collect()
+                vol_sources.iter().map(|choice| Row::plain(choice.label.clone(), None, Some(choice.icon))).collect()
             }
         };
-        let brush = app::with(|app| theme(menu, rows, app)).unwrap_or_default();
-        // Scope the hook to this thread/process and only this popup's modal lifetime.
-        let hook = PopupHook(unsafe { SetWinEventHook(EVENT_SYSTEM_MENUPOPUPSTART, EVENT_SYSTEM_MENUPOPUPSTART, None, Some(popup_started), GetCurrentProcessId(), GetCurrentThreadId(), WINEVENT_OUTOFCONTEXT) });
-        let chosen = unsafe {
-            let _ = SetForegroundWindow(hwnd);
-            let chosen = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, point.x, point.y, Some(0), hwnd, None).0 as usize;
-            let _ = DestroyMenu(menu);
-            PRESENTATION.with(|p| *p.borrow_mut() = None);
-            let _ = DeleteObject(brush.into());
-            chosen
-        };
-        drop(hook);
+        let chosen = track(menu, rows, hwnd, point, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY);
         if chosen > 0 {
             if hit == Hit::LyricsToggle {
                 if let Some((mode, _)) = MODES.get(chosen - 1) {
@@ -335,7 +438,7 @@ mod tests {
         for scale in [1.0, 1.5, 2.0] {
             app.notch.scale = scale;
             let menu = lyrics_menu(LyricsMode::Inside).unwrap();
-            let rows = MODES.iter().map(|(mode, label)| Row { label: label.to_string(), mode: Some(*mode), icon: None }).collect();
+            let rows = MODES.iter().map(|(mode, label)| Row::plain(*label, Some(*mode), None)).collect();
             let brush = theme(menu, rows, &app);
             let mut size = MEASUREITEMSTRUCT { CtlType: ODT_MENU, itemData: 1, ..Default::default() };
             assert!(measure(&app, LPARAM(&mut size as *mut _ as isize)));

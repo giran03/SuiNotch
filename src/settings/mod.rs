@@ -58,6 +58,16 @@ const CARD: C = C(0.135, 0.14, 0.16, 1.0);
 const LINE: C = C(1.0, 1.0, 1.0, 0.06);
 const DIM: C = C(1.0, 1.0, 1.0, 0.52);
 
+/// Popup menus share the Settings window's surface colour.
+pub(crate) fn menu_surface() -> C {
+    SIDE
+}
+
+/// Popup corner radius in DIPs, matching `set_corners`: Soft roundness gets the small Windows corner.
+pub(crate) fn menu_corner_dip(roundness: usize) -> f32 {
+    if roundness == 0 { 4.0 } else { 8.0 }
+}
+
 struct Category {
     name: &'static str,
     glyph: char,
