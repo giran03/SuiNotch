@@ -2,6 +2,12 @@
 
 All notable changes to SuiNotch. Newest first.
 
+## [1.0.8] - 2026-11-10
+
+### Changed
+- The tray icon's right-click menu has a new look that matches the Settings window: its dark surface colour, an icon beside every entry, divider lines between groups, accent-coloured checkmarks and a red Exit entry.
+- The tray menu opens upward or downward depending on which side of the screen the taskbar is on.
+
 ## [1.0.7] - 2026-11-09
 
 ### Added
